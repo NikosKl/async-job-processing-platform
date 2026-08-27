@@ -24,6 +24,8 @@ MarkupSafe==3.0.3
 mdurl==0.1.2
 packaging==26.3
 pluggy==1.6.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
 pydantic==2.13.4
 pydantic-extra-types==2.11.1
 pydantic-settings==2.15.0
@@ -38,6 +40,7 @@ rich-toolkit==0.20.3
 rignore==0.8.1
 sentry-sdk==2.68.1
 shellingham==1.5.4
+SQLAlchemy==2.0.52
 starlette==1.6.0
 truststore==0.10.4
 typer==0.27.1

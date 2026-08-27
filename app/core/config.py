@@ -1,11 +1,12 @@
 from typing import Literal
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_name: str = "Async Job Processing Platform"
     environment: Literal["development", "testing", "production"] = "development"
     debug: bool = False
+
+    database_url: str
 
     model_config = SettingsConfigDict(
         env_file=".env",
