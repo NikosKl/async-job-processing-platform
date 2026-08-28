@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -14,6 +15,7 @@ def test_health():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
 
 def test_health_ready_success():
     mock_session = MagicMock(spec=Session)
@@ -30,9 +32,10 @@ def test_health_ready_success():
     finally:
         app.dependency_overrides.clear()
 
+
 def test_health_ready_failure():
     mock_session = MagicMock(spec=Session)
-    mock_session.scalar.side_effect = RuntimeError("Database unavailable")
+    mock_session.scalar.side_effect = SQLAlchemyError("Database unavailable")
 
     def get_db_override():
         yield mock_session

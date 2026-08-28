@@ -1,0 +1,15 @@
+target-version = "py313"
+line-length = 88
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "I",    # import sorting
+    "B",    # flake8-bugbear
+    "BLE",  # blind exception checks
+    "UP",   # modern Python syntax
+]
+
+[lint.isort]
+known-first-party = ["app"]

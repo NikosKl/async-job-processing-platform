@@ -8,11 +8,8 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
-DBSession = sessionmaker(
-    bind=engine,
-    autoflush=False,
-    expire_on_commit=False
-)
+DBSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
 
 def get_db():
     db = DBSession()
