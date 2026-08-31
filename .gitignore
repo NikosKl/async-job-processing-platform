@@ -1,7 +1,12 @@
-.venv
+.venv/
+venv/
 .idea/
 __pycache__/
 .DS_Store
 .env
 *.db
 PLAN.md
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env.compose
