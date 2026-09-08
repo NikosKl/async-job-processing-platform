@@ -1,15 +1,15 @@
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
+from app.domain.exceptions import IdempotencyConflictError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem, User
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
-from app.services.job_service import create_job
+from app.services.job_service import submit_job
 
 
-def test_job_service_persists_job_items_and_outbox_message(db_session):
+def test_submit_job_persists_job_items_and_outbox_message(db_session):
     user = User(
         email="user@example.com",
         hashed_password="hashed_password",
@@ -28,7 +28,7 @@ def test_job_service_persists_job_items_and_outbox_message(db_session):
         ),
     )
 
-    job = create_job(
+    job = submit_job(
         db=db_session,
         user_id=user.id,
         request=request,
@@ -74,7 +74,7 @@ def test_job_service_persists_job_items_and_outbox_message(db_session):
     assert outbox_messages[0].published_at is None
 
 
-def test_job_service_rollback_on_failure(db_session):
+def test_submit_job_returns_existing_job_for_same_request(db_session):
     user = User(
         email="user@example.com",
         hashed_password="hashed_password",
@@ -93,7 +93,7 @@ def test_job_service_rollback_on_failure(db_session):
         ),
     )
 
-    first_job = create_job(
+    first_job = submit_job(
         db=db_session,
         user_id=user.id,
         request=request,
@@ -102,17 +102,80 @@ def test_job_service_rollback_on_failure(db_session):
 
     assert first_job.id is not None
 
-    with pytest.raises(IntegrityError):
-        create_job(
+    second_job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    assert first_job.id == second_job.id
+
+    stmt = select(Job).where(
+        Job.user_id == user.id, Job.idempotency_key == "test-key-123"
+    )
+    job = db_session.scalars(stmt).one()
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    repository_items = db_session.scalars(stmt).all()
+
+    assert len(repository_items) == 2
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+    outbox_messages = db_session.scalars(stmt).all()
+
+    assert len(outbox_messages) == 1
+
+
+def test_submit_job_raises_conflict_for_same_key_different_request(db_session):
+    user = User(
+        email="user@example.com",
+        hashed_password="hashed_password",
+    )
+
+    db_session.add(user)
+    db_session.flush()
+
+    first_request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+                "SQLAlchemy/SQLAlchemy",
+            ]
+        ),
+    )
+
+    second_request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+                "Pallets/Flask",
+            ]
+        ),
+    )
+
+    first_job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=first_request,
+        idempotency_key="test-key-123",
+    )
+
+    assert first_job.id is not None
+
+    with pytest.raises(IdempotencyConflictError):
+        submit_job(
             db=db_session,
             user_id=user.id,
-            request=request,
+            request=second_request,
             idempotency_key="test-key-123",
         )
 
     stmt = select(Job).where(
         Job.user_id == user.id, Job.idempotency_key == "test-key-123"
     )
-    jobs = db_session.scalars(stmt).all()
+    job = db_session.scalars(stmt).one()
 
-    assert len(jobs) == 1
+    assert job.id == first_job.id
