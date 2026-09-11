@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 from sqlalchemy import select
 
@@ -179,3 +182,72 @@ def test_submit_job_raises_conflict_for_same_key_different_request(db_session):
     job = db_session.scalars(stmt).one()
 
     assert job.id == first_job.id
+
+
+def test_submit_job_handles_concurrent_duplicates(test_session_factory):
+
+    with test_session_factory() as db_session:
+        user = User(
+            email="user_a@example.com",
+            hashed_password="hashed_password",
+        )
+
+        db_session.add(user)
+        db_session.commit()
+
+        user_id = user.id
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+                "SQLAlchemy/SQLAlchemy",
+            ]
+        ),
+    )
+
+    barrier = Barrier(2)
+
+    def submit():
+        with test_session_factory() as session:
+            barrier.wait()
+
+            submitted_job = submit_job(
+                db=session,
+                user_id=user_id,
+                request=request,
+                idempotency_key="test-key-123",
+            )
+            return submitted_job.id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_a = executor.submit(submit)
+        future_b = executor.submit(submit)
+
+        job_id_a = future_a.result()
+        job_id_b = future_b.result()
+
+    assert job_id_a == job_id_b
+
+    with test_session_factory() as verify_session:
+        stmt = select(Job).where(
+            Job.user_id == user.id, Job.idempotency_key == "test-key-123"
+        )
+        jobs = verify_session.scalars(stmt).all()
+
+        job = jobs[0]
+
+        assert len(jobs) == 1
+
+        stmt = select(RepositoryAnalysisItem).where(
+            RepositoryAnalysisItem.job_id == job.id
+        )
+        items = verify_session.scalars(stmt).all()
+
+        assert len(items) == 2
+
+        stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+        outbox_messages = verify_session.scalars(stmt).all()
+
+        assert len(outbox_messages) == 1

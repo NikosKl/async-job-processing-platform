@@ -43,3 +43,12 @@ def db_session(setup_db):
         session.close()
         outer_transaction.rollback()
         connection.close()
+
+
+@pytest.fixture(scope="session")
+def test_session_factory(setup_db):
+    return sessionmaker(
+        bind=test_engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
