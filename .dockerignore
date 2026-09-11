@@ -13,3 +13,4 @@ venv/
 *.db
 PLAN.md
 .env.compose
+.env.test

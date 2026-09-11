@@ -10,3 +10,4 @@ PLAN.md
 .ruff_cache/
 .mypy_cache/
 .env.compose
+.env.test
