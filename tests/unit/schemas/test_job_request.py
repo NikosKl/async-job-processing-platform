@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
+from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 
 
 def test_repository_batch_analysis_accepts_valid_repos():

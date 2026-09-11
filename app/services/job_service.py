@@ -8,7 +8,7 @@ from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStat
 from app.domain.exceptions import IdempotencyConflictError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem
 from app.repositories.job import get_job_by_idempotency_key
-from app.schemas.jobs import CreateJobRequest
+from app.schemas.jobs.requests import CreateJobRequest
 from app.services.job_request import hash_job_request
 
 

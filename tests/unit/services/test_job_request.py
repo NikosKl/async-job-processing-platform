@@ -1,4 +1,4 @@
-from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
+from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request, normalize_job_request
 
 

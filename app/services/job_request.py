@@ -1,7 +1,7 @@
 import hashlib
 import json
 
-from app.schemas.jobs import CreateJobRequest
+from app.schemas.jobs.requests import CreateJobRequest
 
 
 def normalize_job_request(request: CreateJobRequest) -> dict:

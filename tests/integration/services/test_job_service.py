@@ -7,7 +7,7 @@ from sqlalchemy import select
 from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
 from app.domain.exceptions import IdempotencyConflictError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem, User
-from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
+from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
 from app.services.job_service import submit_job
 
