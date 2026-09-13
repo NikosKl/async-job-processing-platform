@@ -1,3 +1,4 @@
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -5,11 +6,11 @@ import pytest
 from sqlalchemy import select
 
 from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
-from app.domain.exceptions import IdempotencyConflictError
+from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem, User
 from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
-from app.services.job_service import submit_job
+from app.services.job_service import get_owned_job, submit_job
 
 
 def test_submit_job_persists_job_items_and_outbox_message(db_session):
@@ -251,3 +252,87 @@ def test_submit_job_handles_concurrent_duplicates(test_session_factory):
         outbox_messages = verify_session.scalars(stmt).all()
 
         assert len(outbox_messages) == 1
+
+
+def test_get_owned_job_success(db_session):
+    user = User(
+        email="user@example.com",
+        hashed_password="hashed_password",
+    )
+
+    db_session.add(user)
+    db_session.flush()
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+                "SQLAlchemy/SQLAlchemy",
+            ]
+        ),
+    )
+
+    submitted_job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    job = get_owned_job(db_session, submitted_job.id, user.id)
+
+    assert job.id == submitted_job.id
+    assert job.user_id == user.id
+
+
+def test_get_owned_job_raises_job_not_found_when_job_does_not_exist(db_session):
+    user = User(
+        email="user@example.com",
+        hashed_password="hashed_password",
+    )
+
+    db_session.add(user)
+    db_session.flush()
+
+    job_id = uuid.uuid4()
+    with pytest.raises(JobNotFoundError):
+        get_owned_job(db_session, job_id, user.id)
+
+
+def test_get_owned_job_raises_job_not_found_when_job_belongs_to_other_user(db_session):
+    user = User(
+        email="user@example.com",
+        hashed_password="hashed_password",
+    )
+
+    db_session.add(user)
+    db_session.flush()
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+                "SQLAlchemy/SQLAlchemy",
+            ]
+        ),
+    )
+
+    submitted_job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    new_user = User(
+        email="new_user@example.com",
+        hashed_password="hashed_password",
+    )
+
+    db_session.add(new_user)
+    db_session.flush()
+
+    with pytest.raises(JobNotFoundError):
+        get_owned_job(db_session, submitted_job.id, new_user.id)
