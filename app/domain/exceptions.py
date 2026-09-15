@@ -4,3 +4,7 @@ class IdempotencyConflictError(Exception):
 
 class JobNotFoundError(Exception):
     pass
+
+
+class EmailAlreadyRegisteredError(Exception):
+    pass
