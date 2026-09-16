@@ -1,6 +1,5 @@
 from sqlalchemy import select
 
-from app.core.security import hash_password
 from app.models import User
 from app.repositories.user import create_user, get_user_by_email
 

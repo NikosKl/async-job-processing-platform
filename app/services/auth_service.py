@@ -1,4 +1,3 @@
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -29,5 +28,3 @@ def register_user(db: Session, user_data: RegisterUserRequest) -> User:
         raise
 
     return user
-
-
