@@ -4,13 +4,13 @@ from threading import Barrier
 import pytest
 from sqlalchemy import delete, select
 
-from app.core.security import verify_password
-from app.domain.exceptions import EmailAlreadyRegisteredError
+from app.core.security import hash_password, verify_password
+from app.domain.exceptions import EmailAlreadyRegisteredError, InvalidCredentialsError
 from app.models import User
-from app.repositories.user import get_user_by_email
+from app.repositories.user import create_user, get_user_by_email
 from app.schemas.users import RegisterUserRequest
 from app.services import auth_service
-from app.services.auth_service import register_user
+from app.services.auth_service import authenticate_user, register_user
 
 
 def test_register_user_creates_user_with_normalized_email(db_session):
@@ -107,3 +107,82 @@ def test_register_user_concurrent_requests_cannot_create_duplicate_users(
             stmt = delete(User).where(User.email == user_data.email)
             cleanup_session.execute(stmt)
             cleanup_session.commit()
+
+
+def test_authenticate_user_returns_user_for_valid_credentials(db_session):
+    email = "user@example.com"
+    password = "password123"
+
+    user = create_user(
+        db_session,
+        email=email,
+        hashed_password=hash_password(password),
+    )
+
+    authenticated_user = authenticate_user(db_session, user.email, password)
+
+    assert authenticated_user.id == user.id
+    assert authenticated_user.email == user.email
+
+
+def test_authenticate_user_normalizes_email_casing(db_session):
+    email = "user@example.com"
+    password = "password123"
+
+    user = create_user(
+        db_session,
+        email=email,
+        hashed_password=hash_password(password),
+    )
+
+    authenticated_user = authenticate_user(db_session, "USER@EXAMPLE.COM", password)
+
+    assert authenticated_user.id == user.id
+    assert authenticated_user.email == email
+
+
+def test_authenticate_user_raises_for_wrong_password(db_session):
+    email = "user@example.com"
+    password = "password123"
+    wrong_password = "wrong_password"
+
+    user = create_user(
+        db_session,
+        email=email,
+        hashed_password=hash_password(password),
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        authenticate_user(db_session, user.email, wrong_password)
+
+
+def test_authenticate_user_raises_for_unknown_email(db_session):
+    email = "user@example.com"
+    password = "password123"
+    wrong_email = "wrong_email@example.com"
+
+    create_user(
+        db_session,
+        email=email,
+        hashed_password=hash_password(password),
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        authenticate_user(db_session, wrong_email, password)
+
+
+def test_authenticate_user_raises_for_inactive_user(db_session):
+    email = "user@example.com"
+    password = "password123"
+
+    user = create_user(
+        db_session,
+        email=email,
+        hashed_password=hash_password(password),
+    )
+
+    user.is_active = False
+    db_session.flush()
+
+    with pytest.raises(InvalidCredentialsError):
+        authenticate_user(db_session, user.email, password)
