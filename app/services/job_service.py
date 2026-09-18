@@ -5,9 +5,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
-from app.domain.exceptions import IdempotencyConflictError
+from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem
-from app.repositories.job import get_job_by_idempotency_key
+from app.repositories.job import get_job_by_id_and_user_id, get_job_by_idempotency_key
 from app.schemas.jobs.requests import CreateJobRequest
 from app.services.job_request import hash_job_request
 
@@ -90,3 +90,10 @@ def submit_job(
         db.rollback()
         raise
     return new_job
+
+
+def get_owned_job(db: Session, job_id: uuid.UUID, user_id: uuid.UUID) -> Job:
+    job = get_job_by_id_and_user_id(db, job_id, user_id)
+    if job is None:
+        raise JobNotFoundError()
+    return job

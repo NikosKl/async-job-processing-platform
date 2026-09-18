@@ -3,11 +3,9 @@ from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-import app.models  # noqa: F401
-from app.db.base import Base
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env.test")
@@ -17,11 +15,13 @@ TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 if not TEST_DATABASE_URL:
     raise RuntimeError("TEST_DATABASE_URL is not set")
 
-os.environ["TEST_DATABASE_URL"] = TEST_DATABASE_URL
-
+import app.models  # noqa: E402, F401
+from app.db.base import Base  # noqa: E402
+from app.db.session import get_db  # noqa: E402
+from app.main import app as fastapi_app  # noqa: E402
 
 test_engine = create_engine(TEST_DATABASE_URL)
-TestSession = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False)
+TestSession = sessionmaker(autoflush=False, expire_on_commit=False)
 
 
 @pytest.fixture(scope="session")
@@ -52,3 +52,17 @@ def test_session_factory(setup_db):
         autoflush=False,
         expire_on_commit=False,
     )
+
+
+@pytest.fixture()
+def client(db_session):
+    def override_get_db():
+        yield db_session
+
+    fastapi_app.dependency_overrides[get_db] = override_get_db
+
+    try:
+        with TestClient(fastapi_app) as client:
+            yield client
+    finally:
+        fastapi_app.dependency_overrides.pop(get_db, None)
