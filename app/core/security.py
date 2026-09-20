@@ -1,6 +1,7 @@
 from pwdlib import PasswordHash
 
 _password_hash = PasswordHash.recommended()
+DUMMY_HASH = _password_hash.hash("dummypassword")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

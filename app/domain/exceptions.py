@@ -8,3 +8,7 @@ class JobNotFoundError(Exception):
 
 class EmailAlreadyRegisteredError(Exception):
     pass
+
+
+class InvalidCredentialsError(Exception):
+    pass
