@@ -1,7 +1,9 @@
+import uuid
+
 from sqlalchemy import select
 
 from app.models import User
-from app.repositories.user import create_user, get_user_by_email
+from app.repositories.user import create_user, get_user_by_email, get_user_by_id
 
 
 def test_get_user_by_email_success(db_session):
@@ -44,3 +46,23 @@ def test_create_user_returns_user_with_all_values(db_session):
     retrieved_user = db_session.scalars(stmt).one_or_none()
 
     assert retrieved_user is not None
+
+
+def test_get_user_by_id_returns_existing_user(db_session):
+    email = "user@example.com"
+    hashed_password = "fake_hashed_password"
+
+    user = create_user(db_session, email, hashed_password)
+
+    returned_user = get_user_by_id(db_session, user.id)
+
+    assert returned_user is not None
+    assert returned_user.id == user.id
+
+
+def test_get_user_by_id_returns_none_for_unknown_user(db_session):
+    user_id = uuid.uuid4()
+
+    user = get_user_by_id(db_session, user_id)
+
+    assert user is None

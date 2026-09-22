@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,3 +17,8 @@ def create_user(db: Session, email: str, hashed_password: str) -> User:
     db.flush()
 
     return user
+
+
+def get_user_by_id(db: Session, user_id: uuid.UUID) -> User | None:
+    stmt = select(User).where(User.id == user_id)
+    return db.scalars(stmt).one_or_none()
