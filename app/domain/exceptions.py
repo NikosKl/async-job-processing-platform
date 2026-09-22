@@ -12,3 +12,7 @@ class EmailAlreadyRegisteredError(Exception):
 
 class InvalidCredentialsError(Exception):
     pass
+
+
+class InvalidAccessTokenError(Exception):
+    pass

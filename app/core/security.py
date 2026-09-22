@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
+from jwt import InvalidTokenError
 from pwdlib import PasswordHash
 
 from app.core.config import settings
+from app.domain.exceptions import InvalidAccessTokenError
 
 _password_hash = PasswordHash.recommended()
 DUMMY_HASH = _password_hash.hash("dummypassword")
@@ -37,3 +39,19 @@ def create_access_token(user_id: UUID, expires_delta: timedelta | None = None) -
         payload, settings.jwt_secret, algorithm=settings.jwt_algorithm
     )
     return encoded_jwt
+
+
+def decode_access_token(token: str) -> UUID:
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            options={"require": ["sub", "exp"]},
+        )
+
+        sub = UUID(payload["sub"])
+    except (InvalidTokenError, ValueError) as err:
+        raise InvalidAccessTokenError() from err
+
+    return sub
