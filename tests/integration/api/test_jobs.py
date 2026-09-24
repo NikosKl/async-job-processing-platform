@@ -83,3 +83,112 @@ def test_get_job_detail_returns_401_without_authentication(client):
     response = client.get(f"/jobs/{job_id}")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_create_job_returns_201_for_valid_request(client, authenticated_user_factory):
+
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    headers["Idempotency-Key"] = "test-idempotency-key"
+
+    response = client.post("/jobs", json=request.model_dump(), headers=headers)
+
+    assert response.status_code == status.HTTP_201_CREATED
+
+    data = response.json()
+
+    assert data["type"] == "REPOSITORY_BATCH_ANALYSIS"
+    assert data["status"] == "QUEUED"
+    assert data["progress_total"] == 1
+
+def test_create_job_returns_401_without_authentication(client):
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    headers = {
+        "Idempotency-Key": "test-idempotency-key",
+    }
+
+    response = client.post("/jobs", json=request.model_dump(), headers=headers)
+
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_create_job_returns_422_without_idempotency_key(
+    client, authenticated_user_factory
+):
+
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    response = client.post("/jobs", json=request.model_dump(), headers=headers)
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+def test_create_job_repeating_same_key_and_request_returns_same_job(
+    client, authenticated_user_factory
+):
+
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    headers["Idempotency-Key"] = "test-idempotency-key"
+
+    first_response = client.post("/jobs", json=request.model_dump(), headers=headers)
+
+    assert first_response.status_code == status.HTTP_201_CREATED
+    first_job_id = first_response.json()["id"]
+
+    second_response = client.post("/jobs", json=request.model_dump(), headers=headers)
+
+    assert second_response.status_code == status.HTTP_201_CREATED
+    second_job_id = second_response.json()["id"]
+
+    assert second_job_id == first_job_id
+
+
+def test_create_job_repeating_same_key_with_different_request_returns_409(
+    client, authenticated_user_factory
+):
+
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    first_request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    headers["Idempotency-Key"] = "test-idempotency-key"
+
+    first_response = client.post(
+        "/jobs", json=first_request.model_dump(), headers=headers
+    )
+    assert first_response.status_code == status.HTTP_201_CREATED
+
+    second_request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["new_owner/new_repository"]),
+    )
+
+    second_response = client.post(
+        "/jobs", json=second_request.model_dump(), headers=headers
+    )
+    assert second_response.status_code == status.HTTP_409_CONFLICT
+    assert second_response.json() == {"detail": "Idempotency key conflict"}
