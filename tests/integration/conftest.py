@@ -7,6 +7,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.security import create_access_token, hash_password
+from app.repositories.user import create_user
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env.test")
 
@@ -66,3 +69,15 @@ def client(db_session):
             yield client
     finally:
         fastapi_app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture()
+def authenticated_user_factory(db_session):
+    def create_authenticated_user(email: str, password: str):
+        user = create_user(db_session, email, hash_password(password))
+        token = create_access_token(user.id)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        return user, headers
+
+    return create_authenticated_user
