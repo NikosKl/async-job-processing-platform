@@ -106,6 +106,7 @@ def test_create_job_returns_201_for_valid_request(client, authenticated_user_fac
     assert data["status"] == "QUEUED"
     assert data["progress_total"] == 1
 
+
 def test_create_job_returns_401_without_authentication(client):
 
     request = CreateJobRequest(
