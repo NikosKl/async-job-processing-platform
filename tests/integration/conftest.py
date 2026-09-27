@@ -48,13 +48,19 @@ def db_session(setup_db):
         connection.close()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def test_session_factory(setup_db):
-    return sessionmaker(
+    factory = sessionmaker(
         bind=test_engine,
         autoflush=False,
         expire_on_commit=False,
     )
+
+    yield factory
+
+    with test_engine.begin() as connection:
+        for table in reversed(Base.metadata.sorted_tables):
+            connection.execute(table.delete())
 
 
 @pytest.fixture()

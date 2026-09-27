@@ -8,6 +8,9 @@ from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStat
 from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
 from app.models import Job, OutboxMessage, RepositoryAnalysisItem
 from app.repositories.job import get_job_by_id_and_user_id, get_job_by_idempotency_key
+from app.repositories.repository_analysis_item import (
+    list_repository_analysis_items_by_job_id,
+)
 from app.schemas.jobs.requests import CreateJobRequest
 from app.services.job_request import hash_job_request
 
@@ -97,3 +100,14 @@ def get_owned_job(db: Session, job_id: uuid.UUID, user_id: uuid.UUID) -> Job:
     if job is None:
         raise JobNotFoundError()
     return job
+
+
+def get_owned_job_results(
+    db: Session, job_id: uuid.UUID, user_id: uuid.UUID
+) -> list[RepositoryAnalysisItem]:
+
+    job = get_owned_job(db, job_id, user_id)
+
+    items = list_repository_analysis_items_by_job_id(db, job.id)
+
+    return items
