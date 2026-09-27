@@ -375,9 +375,7 @@ def test_get_jobs_returns_422_for_invalid_limit_below_1(
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
-def test_get_jobs_returns_422_for_invalid_offset(
-    client, authenticated_user_factory
-):
+def test_get_jobs_returns_422_for_invalid_offset(client, authenticated_user_factory):
     _, headers = authenticated_user_factory("user@example.com", "password123")
 
     response = client.get("/jobs?offset=-1", headers=headers)
