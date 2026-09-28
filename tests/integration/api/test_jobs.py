@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import status
 
-from app.domain.enums import JobStatus
+from app.domain.enums import JobStatus, RepositoryStatus
 from app.repositories.user import create_user
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
@@ -380,3 +380,107 @@ def test_get_jobs_returns_422_for_invalid_offset(client, authenticated_user_fact
 
     response = client.get("/jobs?offset=-1", headers=headers)
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+def test_get_job_results_returns_all_items_in_position_order_for_owner(
+    client, authenticated_user_factory, db_session
+):
+    user, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["fastapi/fastapi", "sqlalchemy/sqlalchemy", "pallets/flask"]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    response = client.get(f"/jobs/{job.id}/results", headers=headers)
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+    assert len(data) == 3
+    assert [item["position"] for item in data] == [0, 1, 2]
+
+
+def test_get_job_results_returns_pending_items_before_job_completion(
+    client, authenticated_user_factory, db_session
+):
+    user, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["fastapi/fastapi", "sqlalchemy/sqlalchemy"]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    response = client.get(f"/jobs/{job.id}/results", headers=headers)
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+
+    assert len(data) == 2
+    assert all(item["status"] == RepositoryStatus.PENDING for item in data)
+
+
+def test_get_job_results_returns_404_for_unknown_job(
+    client, authenticated_user_factory
+):
+    user, headers = authenticated_user_factory("user@example.com", "password123")
+
+    job_id = uuid.uuid4()
+
+    response = client.get(f"/jobs/{job_id}/results", headers=headers)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {"detail": "Job not found"}
+
+
+def test_get_job_results_returns_404_for_another_users_job(
+    client, authenticated_user_factory, db_session
+):
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    user_b = create_user(
+        db_session,
+        email="user_b@example.com",
+        hashed_password="password123",
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["fastapi/fastapi", "sqlalchemy/sqlalchemy"]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user_b.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    response = client.get(f"/jobs/{job.id}/results", headers=headers)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {"detail": "Job not found"}
+
+
+def test_get_results_return_401_for_missing_authentication(client):
+    job_id = uuid.uuid4()
+
+    response = client.get(f"/jobs/{job_id}/results")
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
