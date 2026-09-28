@@ -10,8 +10,13 @@ from app.domain.enums import JobStatus, JobType
 from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
 from app.models import User
 from app.repositories.job import list_jobs_by_user_id
-from app.schemas.jobs import CreateJobRequest, JobDetail, JobSummary
-from app.services.job_service import get_owned_job, submit_job
+from app.schemas.jobs import (
+    CreateJobRequest,
+    JobDetail,
+    JobSummary,
+    RepositoryAnalysisItemRead,
+)
+from app.services.job_service import get_owned_job, get_owned_job_results, submit_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -61,3 +66,22 @@ def get_jobs(
     )
 
     return jobs
+
+
+@router.get(
+    "/{job_id}/results",
+    response_model=list[RepositoryAnalysisItemRead],
+    status_code=status.HTTP_200_OK,
+)
+def get_job_results(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    job_id: UUID,
+):
+    try:
+        items = get_owned_job_results(db, job_id, current_user.id)
+    except JobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        ) from None
+    return items
