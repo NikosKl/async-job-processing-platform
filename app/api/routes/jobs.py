@@ -12,11 +12,17 @@ from app.models import User
 from app.repositories.job import list_jobs_by_user_id
 from app.schemas.jobs import (
     CreateJobRequest,
+    JobAttemptRead,
     JobDetail,
     JobSummary,
     RepositoryAnalysisItemRead,
 )
-from app.services.job_service import get_owned_job, get_owned_job_results, submit_job
+from app.services.job_service import (
+    get_owned_job,
+    get_owned_job_attempts,
+    get_owned_job_results,
+    submit_job,
+)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -85,3 +91,22 @@ def get_job_results(
             status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
         ) from None
     return items
+
+
+@router.get(
+    "/{job_id}/attempts",
+    response_model=list[JobAttemptRead],
+    status_code=status.HTTP_200_OK,
+)
+def get_job_attempts(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    job_id: UUID,
+):
+    try:
+        attempts = get_owned_job_attempts(db, job_id, current_user.id)
+    except JobNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        ) from None
+    return attempts

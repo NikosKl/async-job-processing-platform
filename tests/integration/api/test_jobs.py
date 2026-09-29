@@ -3,7 +3,8 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import status
 
-from app.domain.enums import JobStatus, RepositoryStatus
+from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
+from app.models import JobAttempt
 from app.repositories.user import create_user
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
@@ -484,3 +485,127 @@ def test_get_results_return_401_for_missing_authentication(client):
 
     response = client.get(f"/jobs/{job_id}/results")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_get_job_attempts_returns_attempts_in_attempt_number_order_for_owner(
+    client, authenticated_user_factory, db_session
+):
+    user, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["fastapi/fastapi"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    attempt_a = JobAttempt(
+        job_id=job.id,
+        attempt_number=1,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    attempt_b = JobAttempt(
+        job_id=job.id,
+        attempt_number=2,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    attempt_c = JobAttempt(
+        job_id=job.id,
+        attempt_number=3,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    db_session.add_all([attempt_c, attempt_a, attempt_b])
+    db_session.flush()
+
+    response = client.get(f"/jobs/{job.id}/attempts", headers=headers)
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+    assert len(data) == 3
+    assert [item["attempt_number"] for item in data] == [1, 2, 3]
+
+
+def test_get_job_attempts_returns_empty_list_for_owned_job_with_no_attempts(
+    client, authenticated_user_factory, db_session
+):
+    user, headers = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["fastapi/fastapi"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    response = client.get(f"/jobs/{job.id}/attempts", headers=headers)
+    assert response.status_code == status.HTTP_200_OK
+
+    data = response.json()
+    assert data == []
+
+
+def test_get_job_attempts_returns_404_if_job_does_not_exist(
+    client, authenticated_user_factory
+):
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    job_id = uuid.uuid4()
+
+    response = client.get(f"/jobs/{job_id}/attempts", headers=headers)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {"detail": "Job not found"}
+
+
+def test_get_job_attempts_returns_404_for_another_users_job(
+    client, authenticated_user_factory, db_session
+):
+    _, headers = authenticated_user_factory("user@example.com", "password123")
+
+    user_b = create_user(
+        db_session,
+        email="user_b@example.com",
+        hashed_password="password123",
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["fastapi/fastapi"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user_b.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    response = client.get(f"/jobs/{job.id}/attempts", headers=headers)
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {"detail": "Job not found"}
+
+
+def test_get_job_attempts_returns_401_for_missing_authentication(client):
+    job_id = uuid.uuid4()
+
+    response = client.get(f"/jobs/{job_id}/attempts")
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert response.headers["WWW-Authenticate"] == "Bearer"
