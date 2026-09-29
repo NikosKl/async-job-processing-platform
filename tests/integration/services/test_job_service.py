@@ -1,17 +1,29 @@
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from threading import Barrier
 
 import pytest
 from sqlalchemy import select
 
-from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
+from app.domain.enums import (
+    JobAttemptStatus,
+    JobStatus,
+    JobType,
+    OutboxEventType,
+    RepositoryStatus,
+)
 from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
-from app.models import Job, OutboxMessage, RepositoryAnalysisItem, User
+from app.models import Job, JobAttempt, OutboxMessage, RepositoryAnalysisItem, User
 from app.repositories.user import create_user
 from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
-from app.services.job_service import get_owned_job, get_owned_job_results, submit_job
+from app.services.job_service import (
+    get_owned_job,
+    get_owned_job_attempts,
+    get_owned_job_results,
+    submit_job,
+)
 
 
 def test_submit_job_persists_job_items_and_outbox_message(db_session):
@@ -439,3 +451,125 @@ def test_get_owned_job_results_raises_job_not_found_for_other_users_job(
 
     with pytest.raises(JobNotFoundError):
         get_owned_job_results(db_session, job.id, user_a.id)
+
+
+def test_get_owned_job_attempts_returns_attempts_in_attempt_number_order(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    attempt_a = JobAttempt(
+        job_id=job.id,
+        attempt_number=1,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    attempt_b = JobAttempt(
+        job_id=job.id,
+        attempt_number=2,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    attempt_c = JobAttempt(
+        job_id=job.id,
+        attempt_number=3,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime.now(UTC),
+    )
+
+    db_session.add_all([attempt_c, attempt_a, attempt_b])
+    db_session.flush()
+
+    job_attempts = get_owned_job_attempts(db_session, job.id, user.id)
+
+    assert len(job_attempts) == 3
+    assert [attempt.attempt_number for attempt in job_attempts] == [1, 2, 3]
+
+
+def test_get_owned_job_attempts_returns_empty_list_for_owned_job_with_no_attempts(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    job_attempts = get_owned_job_attempts(db_session, job.id, user.id)
+
+    assert job_attempts == []
+
+
+def test_get_owned_job_attempts_raises_for_unknown_job(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    job_id = uuid.uuid4()
+
+    with pytest.raises(JobNotFoundError):
+        get_owned_job_attempts(db_session, job_id, user.id)
+
+
+def test_get_owned_job_attempts_raises_for_another_user_job(
+    db_session, authenticated_user_factory
+):
+    user_a, _ = authenticated_user_factory("user_a@example.com", "password123")
+
+    user_b = create_user(
+        db_session,
+        email="user_b@example.com",
+        hashed_password="password123",
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user_b.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    with pytest.raises(JobNotFoundError):
+        get_owned_job_attempts(db_session, job.id, user_a.id)
