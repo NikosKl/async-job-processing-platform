@@ -5,6 +5,8 @@ from threading import Barrier
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.domain.enums import (
     JobAttemptStatus,
@@ -19,6 +21,7 @@ from app.repositories.user import create_user
 from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
 from app.services.job_service import (
+    create_job,
     get_owned_job,
     get_owned_job_attempts,
     get_owned_job_results,
@@ -573,3 +576,143 @@ def test_get_owned_job_attempts_raises_for_another_user_job(
 
     with pytest.raises(JobNotFoundError):
         get_owned_job_attempts(db_session, job.id, user_a.id)
+
+
+def test_submit_job_rolls_back_if_commit_fails(
+    db_session, authenticated_user_factory, monkeypatch
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    user_id = user.id
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    def fail_commit(_self):
+        raise SQLAlchemyError("forced commit error")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+
+    with pytest.raises(SQLAlchemyError):
+        submit_job(
+            db=db_session,
+            user_id=user_id,
+            request=request,
+            idempotency_key="test-key-123",
+        )
+
+    stmt = select(Job).where(
+        Job.user_id == user_id, Job.idempotency_key == "test-key-123"
+    )
+    jobs = db_session.scalars(stmt).all()
+
+    assert jobs == []
+
+    stmt = select(RepositoryAnalysisItem)
+    items = db_session.scalars(stmt).all()
+
+    assert items == []
+
+    stmt = select(OutboxMessage)
+    outbox_messages = db_session.scalars(stmt).all()
+
+    assert outbox_messages == []
+
+
+def test_database_rejects_duplicate_user_id_and_idempotency_key(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    request_hash = hash_job_request(request)
+
+    create_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+        request_hash=request_hash,
+    )
+
+    with pytest.raises(IntegrityError):
+        create_job(
+            db=db_session,
+            user_id=user.id,
+            request=request,
+            idempotency_key="test-key-123",
+            request_hash=request_hash,
+        )
+
+
+def test_same_idempotency_key_is_allowed_for_different_users(db_session):
+    user_a = create_user(
+        db_session,
+        email="user_a@example.com",
+        hashed_password="password123",
+    )
+
+    user_b = create_user(
+        db_session,
+        email="user_b@example.com",
+        hashed_password="password123",
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    request_hash = hash_job_request(request)
+
+    job_a = create_job(
+        db=db_session,
+        user_id=user_a.id,
+        request=request,
+        idempotency_key="test-key-123",
+        request_hash=request_hash,
+    )
+
+    job_b = create_job(
+        db=db_session,
+        user_id=user_b.id,
+        request=request,
+        idempotency_key="test-key-123",
+        request_hash=request_hash,
+    )
+
+    stmt = select(Job).where(
+        Job.user_id == user_a.id, Job.idempotency_key == "test-key-123"
+    )
+    user_a_job = db_session.scalars(stmt).all()
+
+    assert len(user_a_job) == 1
+    assert user_a_job[0].id == job_a.id
+
+    stmt = select(Job).where(
+        Job.user_id == user_b.id, Job.idempotency_key == "test-key-123"
+    )
+    user_b_job = db_session.scalars(stmt).all()
+
+    assert len(user_b_job) == 1
+    assert user_b_job[0].id == job_b.id
+
+    assert user_a_job[0].id != user_b_job[0].id
