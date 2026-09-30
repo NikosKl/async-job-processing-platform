@@ -6,8 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import JobStatus, JobType, OutboxEventType, RepositoryStatus
 from app.domain.exceptions import IdempotencyConflictError, JobNotFoundError
-from app.models import Job, OutboxMessage, RepositoryAnalysisItem
+from app.models import Job, JobAttempt, OutboxMessage, RepositoryAnalysisItem
 from app.repositories.job import get_job_by_id_and_user_id, get_job_by_idempotency_key
+from app.repositories.job_attempt import list_job_attempts_by_job_id
 from app.repositories.repository_analysis_item import (
     list_repository_analysis_items_by_job_id,
 )
@@ -111,3 +112,16 @@ def get_owned_job_results(
     items = list_repository_analysis_items_by_job_id(db, job.id)
 
     return items
+
+
+def get_owned_job_attempts(
+    db: Session,
+    job_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> list[JobAttempt]:
+
+    job = get_owned_job(db, job_id, user_id)
+
+    attempts = list_job_attempts_by_job_id(db, job.id)
+
+    return attempts
