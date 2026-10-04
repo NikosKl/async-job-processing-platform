@@ -4,7 +4,11 @@ import pytest
 from sqlalchemy import select
 
 from app.models import OutboxMessage
-from app.repositories.outbox_message import get_due_outbox_messages
+from app.repositories.outbox_message import (
+    get_due_outbox_messages,
+    mark_outbox_message_failed,
+    mark_outbox_message_published,
+)
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_service import submit_job
 
@@ -365,3 +369,238 @@ def test_get_due_outbox_messages_rejects_naive_cutoff(db_session):
             cutoff=cutoff,
             limit=10,
         )
+
+
+def test_mark_outbox_message_published_records_success(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory(
+        email="user@example.com", password="password123"
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+    outbox_message = db_session.scalars(stmt).one()
+
+    published_at = datetime(
+        2026,
+        10,
+        2,
+        12,
+        0,
+        tzinfo=UTC,
+    )
+
+    outbox_message.last_error = "test error"
+
+    db_session.flush()
+
+    mark_outbox_message_published(
+        db=db_session,
+        outbox_message=outbox_message,
+        published_at=published_at,
+    )
+
+    assert outbox_message.published_at == published_at
+    assert outbox_message.publish_attempts == 1
+    assert outbox_message.last_error is None
+
+
+def test_mark_outbox_message_failed_records_failure(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory(
+        email="user@example.com", password="password123"
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+    outbox_message = db_session.scalars(stmt).one()
+
+    long_error_message = "c" * 300
+
+    mark_outbox_message_failed(
+        db=db_session,
+        outbox_message=outbox_message,
+        error=long_error_message,
+    )
+
+    assert outbox_message.published_at is None
+    assert outbox_message.publish_attempts == 1
+    assert outbox_message.last_error == long_error_message[:255]
+
+
+def test_failed_outbox_message_remains_selectable(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory(
+        email="user@example.com", password="password123"
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+    outbox_message = db_session.scalars(stmt).one()
+
+    cutoff = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    outbox_message.available_at = cutoff - timedelta(minutes=5)
+    error = "test error"
+
+    mark_outbox_message_failed(
+        db=db_session, outbox_message=outbox_message, error=error
+    )
+
+    outbox = get_due_outbox_messages(db=db_session, cutoff=cutoff, limit=1)
+
+    assert len(outbox) == 1
+    assert outbox[0].id == outbox_message.id
+    assert outbox[0].published_at is None
+    assert outbox[0].publish_attempts == 1
+    assert outbox[0].last_error == outbox_message.last_error
+
+
+def test_successful_outbox_message_is_excluded(db_session, authenticated_user_factory):
+    user, _ = authenticated_user_factory(
+        email="user@example.com", password="password123"
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job.id)
+    outbox_message = db_session.scalars(stmt).one()
+
+    cutoff = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    outbox_message.available_at = cutoff - timedelta(minutes=5)
+
+    published_at = datetime(
+        2026,
+        10,
+        2,
+        12,
+        0,
+        tzinfo=UTC,
+    )
+
+    mark_outbox_message_published(
+        db=db_session,
+        outbox_message=outbox_message,
+        published_at=published_at,
+    )
+
+    result = get_due_outbox_messages(
+        db=db_session,
+        cutoff=cutoff,
+        limit=1,
+    )
+
+    assert result == []
+
+
+def test_outbox_publication_rollback_restores_state(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory(
+        email="user@example.com", password="password123"
+    )
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    job_id = job.id
+
+    stmt = select(OutboxMessage).where(OutboxMessage.job_id == job_id)
+    outbox_message = db_session.scalars(stmt).one()
+
+    assert outbox_message.published_at is None
+    assert outbox_message.publish_attempts == 0
+    assert outbox_message.last_error is None
+
+    published_at = datetime(
+        2026,
+        10,
+        2,
+        12,
+        0,
+        tzinfo=UTC,
+    )
+
+    mark_outbox_message_published(
+        db=db_session,
+        outbox_message=outbox_message,
+        published_at=published_at,
+    )
+
+    assert outbox_message.published_at == published_at
+    assert outbox_message.publish_attempts == 1
+    assert outbox_message.last_error is None
+
+    db_session.rollback()
+
+    outbox_message = db_session.scalars(stmt).one()
+
+    assert outbox_message.published_at is None
+    assert outbox_message.publish_attempts == 0
+    assert outbox_message.last_error is None
