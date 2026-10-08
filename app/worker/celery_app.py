@@ -17,4 +17,12 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=False,
     imports=("app.worker.tasks",),
+    beat_schedule={
+        "publish_outbox": {
+            "task": "run_outbox_publisher_batch",
+            "schedule": 10,
+            "args": (),
+            "options": {"queue": "jobs"},
+        }
+    },
 )

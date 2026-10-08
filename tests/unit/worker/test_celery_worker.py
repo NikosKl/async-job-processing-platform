@@ -31,3 +31,26 @@ def test_celery_ignores_task_results():
 
 def test_celery_worker_concurrency():
     assert celery_app.conf.worker_concurrency == 2
+
+
+def test_publisher_beat_schedule_exists():
+    assert "publish_outbox" in celery_app.conf.beat_schedule
+
+
+def test_publisher_beat_schedule_targets_registered_task():
+    publisher_schedule = celery_app.conf.beat_schedule["publish_outbox"]
+
+    assert publisher_schedule["task"] == "run_outbox_publisher_batch"
+
+
+def test_publisher_beat_schedule_runs_every_ten_seconds():
+    publisher_schedule = celery_app.conf.beat_schedule["publish_outbox"]
+
+    assert publisher_schedule["schedule"] == 10
+
+
+def test_publisher_beat_schedule_routes_to_jobs_with_no_arguments():
+    publisher_schedule = celery_app.conf.beat_schedule["publish_outbox"]
+
+    assert publisher_schedule["args"] == ()
+    assert publisher_schedule["options"]["queue"] == "jobs"
