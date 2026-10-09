@@ -1,9 +1,16 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy import select
+
 from app.domain.enums import JobStatus, JobType
-from app.models import User
-from app.repositories.job import get_job_by_id_and_user_id, list_jobs_by_user_id
+from app.models import Job, User
+from app.repositories.job import (
+    claim_job,
+    get_job_by_id_and_user_id,
+    list_jobs_by_user_id,
+)
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_service import submit_job
 
@@ -281,3 +288,351 @@ def test_list_jobs_by_user_id_filters_by_type(db_session, authenticated_user_fac
 
     assert len(jobs) == 3
     assert all(job.type == JobType.REPOSITORY_BATCH_ANALYSIS for job in jobs)
+
+
+def test_claim_job_claims_queued_job(db_session, authenticated_user_factory):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.attempt_count == 1
+    assert claimed_job.execution_token == execution_token
+    assert claimed_job.lease_expires_at == lease_expires_at
+    assert claimed_job.next_attempt_at is None
+
+
+def test_claim_job_claims_due_retry_at_exact_boundary(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    job.status = JobStatus.RETRYING
+    job.next_attempt_at = claim_time
+    job.attempt_count = 1
+
+    db_session.flush()
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.attempt_count == 2
+    assert claimed_job.execution_token == execution_token
+    assert claimed_job.lease_expires_at == lease_expires_at
+    assert claimed_job.next_attempt_at is None
+
+
+def test_claim_job_returns_none_for_future_retry(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    job.status = JobStatus.RETRYING
+    job.next_attempt_at = claim_time + timedelta(minutes=5)
+    job.attempt_count = 1
+
+    db_session.flush()
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is None
+    assert job.status == JobStatus.RETRYING
+    assert job.attempt_count == 1
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+    assert job.next_attempt_at == claim_time + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        JobStatus.RUNNING,
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+    ],
+)
+def test_claim_job_returns_none_for_ineligible_status(
+    db_session, authenticated_user_factory, status
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    job.status = status
+    db_session.flush()
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is None
+    assert job.status == status
+    assert job.attempt_count == 0
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+
+def test_claim_job_returns_none_for_missing_job(db_session):
+    job_id = uuid.uuid4()
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job_id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is None
+
+
+def test_claim_job_second_claim_cannot_replace_ownership(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token_a = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token_a,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is not None
+
+    execution_token_b = uuid.uuid4()
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token_b,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is None
+    assert job.status == JobStatus.RUNNING
+    assert job.attempt_count == 1
+    assert job.execution_token == execution_token_a
+    assert job.lease_expires_at == lease_expires_at
+
+
+def test_claim_job_rollback_restores_original_state(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["owner/repository"]),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + timedelta(minutes=10)
+
+    original_status = job.status
+    original_attempt_count = job.attempt_count
+    original_execution_token = job.execution_token
+    original_lease_expires_at = job.lease_expires_at
+    original_next_attempt_at = job.next_attempt_at
+
+    claimed_job = claim_job(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        execution_token=execution_token,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.attempt_count == 1
+    assert claimed_job.execution_token == execution_token
+    assert claimed_job.lease_expires_at == lease_expires_at
+
+    db_session.rollback()
+
+    stmt = select(Job).where(Job.id == job.id)
+    job = db_session.scalars(stmt).one()
+
+    assert job.status == original_status
+    assert job.attempt_count == original_attempt_count
+    assert job.execution_token == original_execution_token
+    assert job.lease_expires_at == original_lease_expires_at
+    assert job.next_attempt_at == original_next_attempt_at
+
+
+def test_claim_job_rejects_naive_claim_time(db_session):
+    job_id = uuid.uuid4()
+
+    claim_time = datetime(2026, 10, 2, 12, 0)
+    execution_token = uuid.uuid4()
+    lease_expires_at = datetime(2026, 10, 2, 12, 10, tzinfo=UTC)
+
+    with pytest.raises(ValueError):
+        claim_job(
+            db=db_session,
+            job_id=job_id,
+            claim_time=claim_time,
+            execution_token=execution_token,
+            lease_expires_at=lease_expires_at,
+        )
+
+
+def test_claim_job_rejects_naive_lease_expiry(db_session):
+    job_id = uuid.uuid4()
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = datetime(2026, 10, 2, 12, 0)
+
+    with pytest.raises(ValueError):
+        claim_job(
+            db=db_session,
+            job_id=job_id,
+            claim_time=claim_time,
+            execution_token=execution_token,
+            lease_expires_at=lease_expires_at,
+        )
+
+
+@pytest.mark.parametrize(
+    "lease_offset",
+    [
+        timedelta(minutes=-10),
+        timedelta(0),
+    ],
+)
+def test_claim_job_rejects_lease_expiry_not_later_than_claim_time(
+    db_session,
+    lease_offset,
+):
+    job_id = uuid.uuid4()
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    execution_token = uuid.uuid4()
+    lease_expires_at = claim_time + lease_offset
+
+    with pytest.raises(ValueError):
+        claim_job(
+            db=db_session,
+            job_id=job_id,
+            claim_time=claim_time,
+            execution_token=execution_token,
+            lease_expires_at=lease_expires_at,
+        )
