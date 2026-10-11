@@ -1,6 +1,6 @@
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 
 import pytest
@@ -21,6 +21,7 @@ from app.repositories.user import create_user
 from app.schemas.jobs.requests import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
 from app.services.job_service import (
+    claim_job_for_execution,
     create_job,
     get_owned_job,
     get_owned_job_attempts,
@@ -716,3 +717,362 @@ def test_same_idempotency_key_is_allowed_for_different_users(db_session):
     assert user_b_job[0].id == job_b.id
 
     assert user_a_job[0].id != user_b_job[0].id
+
+
+def test_claim_job_for_execution_persists_matching_job_and_attempt(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+
+    stmt = select(Job).where(Job.id == claimed_job.id)
+    job = db_session.scalars(stmt).one()
+
+    assert job is not None
+    assert job.attempt_count == 1
+    assert job.status == JobStatus.RUNNING
+    assert job.execution_token is not None
+    assert job.lease_expires_at == claim_time + lease_duration
+
+    stmt = select(JobAttempt).where(JobAttempt.job_id == job.id)
+    job_attempt = db_session.scalars(stmt).one()
+
+    assert job_attempt.job_id == job.id
+    assert job_attempt.attempt_number == 1
+    assert job_attempt.status == JobAttemptStatus.RUNNING
+    assert job_attempt.execution_token == job.execution_token
+    assert job_attempt.started_at == claim_time
+
+
+def test_claim_job_for_execution_due_retry_creates_next_attempt(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    job.status = JobStatus.RETRYING
+    job.attempt_count = 1
+    job.next_attempt_at = claim_time
+
+    db_session.flush()
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.attempt_count == 2
+    assert claimed_job.next_attempt_at is None
+
+    stmt = select(JobAttempt).where(JobAttempt.job_id == job.id)
+    job_attempt = db_session.scalars(stmt).one()
+
+    assert job_attempt is not None
+    assert job_attempt.attempt_number == 2
+    assert job_attempt.status == JobAttemptStatus.RUNNING
+    assert job_attempt.execution_token == claimed_job.execution_token
+    assert job_attempt.started_at == claim_time
+
+
+def test_claim_job_for_execution_unsuccessful_claim_creates_no_attempt(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    job.status = JobStatus.RUNNING
+    db_session.commit()
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is None
+
+    stmt = select(JobAttempt).where(JobAttempt.job_id == job.id)
+    job_attempt = db_session.scalars(stmt).one_or_none()
+
+    assert job_attempt is None
+
+
+def test_claim_job_for_execution_attempt_failure_rolls_back_job_claim(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    job_attempt = JobAttempt(
+        job_id=job.id,
+        attempt_number=1,
+        status=JobAttemptStatus.RUNNING,
+        execution_token=uuid.uuid4(),
+        started_at=datetime(2026, 10, 2, 12, 0, tzinfo=UTC),
+    )
+
+    db_session.add(job_attempt)
+    db_session.commit()
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    with pytest.raises(IntegrityError):
+        claim_job_for_execution(
+            db=db_session,
+            job_id=job.id,
+            claim_time=claim_time,
+            lease_duration=lease_duration,
+        )
+
+    stmt = select(Job).where(Job.id == job.id)
+    job = db_session.scalars(stmt).one()
+
+    assert job.status == JobStatus.QUEUED
+    assert job.attempt_count == 0
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+
+def test_claim_job_for_execution_commit_failure_rolls_back_both_changes(
+    db_session, authenticated_user_factory, monkeypatch
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "FastApi/FastApi",
+            ]
+        ),
+    )
+
+    job = submit_job(
+        db=db_session,
+        user_id=user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    def fail_commit(_self):
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+
+    with pytest.raises(SQLAlchemyError):
+        claim_job_for_execution(
+            db=db_session,
+            job_id=job.id,
+            claim_time=claim_time,
+            lease_duration=lease_duration,
+        )
+
+    stmt = select(Job).where(Job.id == job.id)
+    job = db_session.scalars(stmt).one()
+
+    assert job.status == JobStatus.QUEUED
+    assert job.attempt_count == 0
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+    stmt = select(JobAttempt).where(JobAttempt.job_id == job.id)
+    job_attempt = db_session.scalars(stmt).one_or_none()
+
+    assert job_attempt is None
+
+
+def test_claim_job_for_execution_allows_only_one_concurrent_winner(
+    test_session_factory,
+):
+    session_factory = test_session_factory
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi"],
+        ),
+    )
+
+    with session_factory() as setup_session:
+        user = create_user(
+            setup_session,
+            email="user@example.com",
+            hashed_password="hashed_password",
+        )
+
+        job = submit_job(
+            db=setup_session,
+            user_id=user.id,
+            request=request,
+            idempotency_key="test-key-123",
+        )
+
+        job_id = job.id
+
+        setup_session.commit()
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    barrier = Barrier(2)
+
+    def claim_worker():
+        with session_factory() as worker_session:
+            barrier.wait(timeout=5)
+
+            claimed_job = claim_job_for_execution(
+                db=worker_session,
+                job_id=job_id,
+                claim_time=claim_time,
+                lease_duration=lease_duration,
+            )
+
+            return claimed_job is not None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_a = executor.submit(claim_worker)
+        future_b = executor.submit(claim_worker)
+
+        results = [
+            future_a.result(),
+            future_b.result(),
+        ]
+
+    assert results.count(True) == 1
+    assert results.count(False) == 1
+
+    with session_factory() as verification_session:
+        stmt = select(Job).where(Job.id == job_id)
+        persisted_job = verification_session.scalars(stmt).one()
+
+        stmt = select(JobAttempt).where(JobAttempt.job_id == job_id)
+        attempts = verification_session.scalars(stmt).all()
+
+        assert persisted_job.status == JobStatus.RUNNING
+        assert persisted_job.attempt_count == 1
+        assert persisted_job.execution_token is not None
+
+        assert len(attempts) == 1
+
+        attempt = attempts[0]
+
+        assert attempt.attempt_number == 1
+        assert attempt.status == JobAttemptStatus.RUNNING
+        assert attempt.execution_token == persisted_job.execution_token
+        assert attempt.started_at == claim_time
+
+
+@pytest.mark.parametrize(
+    ("claim_time", "lease_duration"),
+    [
+        (
+            datetime(2026, 10, 2, 12, 0),
+            timedelta(minutes=10),
+        ),
+        (
+            datetime(2026, 10, 2, 12, 0, tzinfo=UTC),
+            timedelta(minutes=0),
+        ),
+        (
+            datetime(2026, 10, 2, 12, 0, tzinfo=UTC),
+            timedelta(minutes=-5),
+        ),
+    ],
+)
+def test_claim_job_for_execution_rejects_invalid_inputs(
+    db_session, claim_time, lease_duration
+):
+    with pytest.raises(ValueError):
+        claim_job_for_execution(
+            db=db_session,
+            job_id=uuid.uuid4(),
+            claim_time=claim_time,
+            lease_duration=lease_duration,
+        )
