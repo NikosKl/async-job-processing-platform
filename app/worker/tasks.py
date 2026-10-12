@@ -1,10 +1,13 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from app.db.session import DBSession
+from app.services.job_service import claim_job_for_execution
 from app.services.outbox_publisher import publish_outbox_batch
 from app.worker.celery_app import celery_app
 
 OUTBOX_BATCH_SIZE = 100
+LEASE_DURATION = timedelta(minutes=10)
 
 
 @celery_app.task(name="run_outbox_publisher_batch")
@@ -20,5 +23,27 @@ def run_outbox_publisher_batch():
             cutoff=cutoff,
             limit=OUTBOX_BATCH_SIZE,
         )
+    finally:
+        db.close()
+
+
+@celery_app.task(name="process_job")
+def process_job(job_id: str) -> None:
+
+    parsed_job_id = UUID(job_id)
+    db = DBSession()
+
+    claim_time = datetime.now(UTC)
+
+    try:
+        claim = claim_job_for_execution(
+            db=db,
+            job_id=parsed_job_id,
+            claim_time=claim_time,
+            lease_duration=LEASE_DURATION,
+        )
+
+        if claim is None:
+            return
     finally:
         db.close()
