@@ -93,3 +93,24 @@ def claim_job(
     )
 
     return db.scalars(stmt).one_or_none()
+
+
+def increment_job_progress(
+    db: Session,
+    job_id: uuid.UUID,
+) -> Job:
+    """
+    Increment progress for a Job whose row is already locked.
+
+    The caller must have already verified execution ownership and must keep
+    this update in the same transaction as the related item-result write.
+    """
+
+    stmt = select(Job).where(Job.id == job_id)
+    job = db.scalars(stmt).one()
+
+    job.progress_completed += 1
+
+    db.flush()
+
+    return job
