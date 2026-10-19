@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -167,3 +167,47 @@ def complete_claimed_job(
     except SQLAlchemyError:
         db.rollback()
         raise
+
+
+def execute_claimed_job(
+    db: Session,
+    job_id: uuid.UUID,
+    execution_token: uuid.UUID,
+) -> bool:
+    stmt = (
+        select(RepositoryAnalysisItem)
+        .where(
+            RepositoryAnalysisItem.job_id == job_id,
+            RepositoryAnalysisItem.status == RepositoryStatus.PENDING,
+        )
+        .order_by(RepositoryAnalysisItem.position)
+    )
+    items = db.scalars(stmt).all()
+
+    for item in items:
+        analysis_result = run_fake_repository_analysis(
+            owner=item.owner, repository=item.repository_name
+        )
+
+        completed_at = datetime.now(UTC)
+
+        result = save_item_result_and_update_progress(
+            db=db,
+            job_id=job_id,
+            item_id=item.id,
+            execution_token=execution_token,
+            analysis_result=analysis_result,
+            completed_at=completed_at,
+        )
+
+        if not result:
+            return False
+
+    job_completed_at = datetime.now(UTC)
+
+    return complete_claimed_job(
+        db=db,
+        job_id=job_id,
+        execution_token=execution_token,
+        completed_at=job_completed_at,
+    )

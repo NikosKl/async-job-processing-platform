@@ -12,6 +12,7 @@ from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.services.job_execution_service import (
     RepositoryAnalysisResult,
     complete_claimed_job,
+    execute_claimed_job,
     save_item_result_and_update_progress,
 )
 
@@ -1017,3 +1018,167 @@ def test_complete_claimed_job_rejects_naive_completion_time(db_session):
             execution_token=execution_token,
             completed_at=completed_at,
         )
+
+
+def test_execute_claimed_job_persists_results_and_completes_job(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy"],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    job_id = claimed_job.id
+    execution_token = claimed_job.execution_token
+
+    assert execution_token is not None
+
+    result = execute_claimed_job(
+        db=db_session,
+        job_id=job_id,
+        execution_token=execution_token,
+    )
+
+    assert result is True
+
+    db_session.expire_all()
+
+    stmt = select(Job).where(Job.id == job_id)
+    job = db_session.scalars(stmt).one()
+
+    stmt = select(JobAttempt).where(
+        JobAttempt.job_id == job_id, JobAttempt.attempt_number == job.attempt_count
+    )
+    attempt = db_session.scalars(stmt).one()
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job_id)
+    analysis_items = db_session.scalars(stmt).all()
+
+    assert len(analysis_items) == 2
+
+    for item in analysis_items:
+        assert item.status == RepositoryStatus.SUCCEEDED
+        assert item.stars == 0
+        assert item.forks == 0
+        assert item.open_issues == 0
+        assert item.completed_at is not None
+
+    assert job.status == JobStatus.COMPLETED
+    assert job.progress_completed == 2
+    assert job.progress_total == 2
+    assert job.result_summary == {
+        "total": 2,
+        "succeeded": 2,
+        "failed": 0,
+    }
+    assert job.finished_at is not None
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+    assert attempt.status == JobAttemptStatus.SUCCEEDED
+    assert attempt.finished_at == job.finished_at
+    assert attempt.execution_token == execution_token
+
+
+def test_execute_claimed_job_skips_existing_terminal_items(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=[
+            "FastApi/FastApi",
+            "SQLAlchemy/SQLAlchemy",
+            "Pallets/Flask",
+        ],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    job_id = claimed_job.id
+    execution_token = claimed_job.execution_token
+
+    assert execution_token is not None
+
+    items = sorted(items, key=lambda item: item.position)
+
+    pending_item = items[0]
+    succeeded_item = items[1]
+    failed_item = items[2]
+
+    succeeded_completed_at = datetime(2026, 10, 2, 12, 1, tzinfo=UTC)
+    failed_completed_at = datetime(2026, 10, 2, 12, 2, tzinfo=UTC)
+
+    succeeded_item.status = RepositoryStatus.SUCCEEDED
+    succeeded_item.stars = 100
+    succeeded_item.forks = 20
+    succeeded_item.open_issues = 5
+    succeeded_item.completed_at = succeeded_completed_at
+    succeeded_item.attempt_count = 2
+
+    failed_item.status = RepositoryStatus.FAILED
+    failed_item.completed_at = failed_completed_at
+    failed_item.attempt_count = 3
+    failed_item.error_type = "AnalysisError"
+    failed_item.error_message = "existing failure"
+
+    succeeded_item_id = succeeded_item.id
+    failed_item_id = failed_item.id
+
+    db_session.flush()
+    db_session.commit()
+
+    analysis_result = RepositoryAnalysisResult(
+        owner=pending_item.owner,
+        repository=pending_item.repository_name,
+        stars=0,
+        forks=0,
+        open_issues=0,
+    )
+
+    with patch(
+        "app.services.job_execution_service.run_fake_repository_analysis",
+        return_value=analysis_result,
+    ) as analysis_mock:
+        result = execute_claimed_job(
+            db=db_session,
+            job_id=job_id,
+            execution_token=execution_token,
+        )
+
+    assert result is True
+
+    analysis_mock.assert_called_once_with(
+        owner=pending_item.owner,
+        repository=pending_item.repository_name,
+    )
+
+    db_session.expire_all()
+
+    succeeded_item = db_session.scalars(
+        select(RepositoryAnalysisItem).where(
+            RepositoryAnalysisItem.id == succeeded_item_id
+        )
+    ).one()
+
+    failed_item = db_session.scalars(
+        select(RepositoryAnalysisItem).where(
+            RepositoryAnalysisItem.id == failed_item_id
+        )
+    ).one()
+
+    assert succeeded_item.status == RepositoryStatus.SUCCEEDED
+    assert succeeded_item.stars == 100
+    assert succeeded_item.forks == 20
+    assert succeeded_item.open_issues == 5
+    assert succeeded_item.completed_at == succeeded_completed_at
+    assert succeeded_item.attempt_count == 2
+
+    assert failed_item.status == RepositoryStatus.FAILED
+    assert failed_item.completed_at == failed_completed_at
+    assert failed_item.attempt_count == 3
+    assert failed_item.error_type == "AnalysisError"
+    assert failed_item.error_message == "existing failure"
