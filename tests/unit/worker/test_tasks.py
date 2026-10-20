@@ -88,7 +88,8 @@ def test_process_job_passes_uuid_to_claim_service():
 
     with patch("app.worker.tasks.DBSession"):
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-            process_job.run(parsed_job_id)
+            with patch("app.worker.tasks.execute_claimed_job"):
+                process_job.run(parsed_job_id)
 
             called_id = claim_mock.call_args.kwargs["job_id"]
 
@@ -105,7 +106,8 @@ def test_process_job_passes_utc_time_and_lease_duration():
 
         with patch("app.worker.tasks.DBSession"):
             with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-                process_job.run(job_id)
+                with patch("app.worker.tasks.execute_claimed_job"):
+                    process_job.run(job_id)
 
     called_claim_time = claim_mock.call_args.kwargs["claim_time"]
     called_lease_duration = claim_mock.call_args.kwargs["lease_duration"]
@@ -124,9 +126,11 @@ def test_process_job_unsuccessful_claim_returns_normally():
         with patch(
             "app.worker.tasks.claim_job_for_execution", return_value=None
         ) as claim_mock:
-            process_job.run(job_id)
+            with patch("app.worker.tasks.execute_claimed_job") as execute_mock:
+                process_job.run(job_id)
 
     claim_mock.assert_called_once()
+    execute_mock.assert_not_called()
 
 
 def test_process_job_closes_session_after_success():
@@ -134,9 +138,9 @@ def test_process_job_closes_session_after_success():
 
     with patch("app.worker.tasks.DBSession") as session_factory_mock:
         fake_session = session_factory_mock.return_value
-
         with patch("app.worker.tasks.claim_job_for_execution"):
-            process_job.run(job_id)
+            with patch("app.worker.tasks.execute_claimed_job"):
+                process_job.run(job_id)
 
         fake_session.close.assert_called_once()
 
@@ -178,17 +182,18 @@ def test_process_job_uses_separate_sessions():
         session_factory_mock.side_effect = [session_a, session_b]
 
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-            for _ in range(2):
-                process_job.run(job_id)
+            with patch("app.worker.tasks.execute_claimed_job"):
+                for _ in range(2):
+                    process_job.run(job_id)
 
-            call_a = claim_mock.call_args_list[0]
-            call_b = claim_mock.call_args_list[1]
+                call_a = claim_mock.call_args_list[0]
+                call_b = claim_mock.call_args_list[1]
 
-            call_a_db = call_a.kwargs["db"]
-            call_b_db = call_b.kwargs["db"]
+                call_a_db = call_a.kwargs["db"]
+                call_b_db = call_b.kwargs["db"]
 
-            assert call_a_db is session_a
-            assert call_b_db is session_b
+                assert call_a_db is session_a
+                assert call_b_db is session_b
 
     assert session_factory_mock.call_count == 2
     session_a.close.assert_called_once()
@@ -206,8 +211,9 @@ def test_process_job_uses_fresh_claim_time_per_invocation():
 
         with patch("app.worker.tasks.DBSession"):
             with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-                process_job.run(job_id)
-                process_job.run(job_id)
+                with patch("app.worker.tasks.execute_claimed_job"):
+                    process_job.run(job_id)
+                    process_job.run(job_id)
 
     first_call = claim_mock.call_args_list[0]
     second_call = claim_mock.call_args_list[1]
@@ -216,3 +222,63 @@ def test_process_job_uses_fresh_claim_time_per_invocation():
     assert second_call.kwargs["claim_time"] == time_b
 
     assert datetime_mock.now.call_count == 2
+
+
+def test_process_job_successful_claim_calls_execution_service():
+    job_id = str(uuid.uuid4())
+    execution_token = uuid.uuid4()
+
+    with patch("app.worker.tasks.DBSession") as session_factory_mock:
+        with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
+            claim_mock.return_value.execution_token = execution_token
+            with patch("app.worker.tasks.execute_claimed_job") as execute_mock:
+                process_job.run(job_id)
+
+    execute_mock.assert_called_once()
+
+    called_kwargs = execute_mock.call_args.kwargs
+
+    assert called_kwargs["execution_token"] == execution_token
+    assert called_kwargs["db"] is session_factory_mock.return_value
+    assert called_kwargs["job_id"] == uuid.UUID(job_id)
+
+
+@pytest.mark.parametrize(
+    "execution_result",
+    [
+        True,
+        False,
+    ],
+)
+def test_process_job_closes_session_after_execution(execution_result):
+    job_id = str(uuid.uuid4())
+    execution_token = uuid.uuid4()
+
+    with patch("app.worker.tasks.DBSession") as session_factory_mock:
+        with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
+            claim_mock.return_value.execution_token = execution_token
+            with patch(
+                "app.worker.tasks.execute_claimed_job", return_value=execution_result
+            ) as execute_mock:
+                process_job.run(job_id)
+
+    session_factory_mock.return_value.close.assert_called_once()
+    execute_mock.assert_called_once()
+
+
+def test_process_job_closes_session_and_propagates_execution_error():
+    job_id = str(uuid.uuid4())
+    execution_token = uuid.uuid4()
+
+    with patch("app.worker.tasks.DBSession") as session_factory_mock:
+        with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
+            claim_mock.return_value.execution_token = execution_token
+            with patch(
+                "app.worker.tasks.execute_claimed_job",
+                side_effect=RuntimeError("execution failed"),
+            ) as execute_mock:
+                with pytest.raises(RuntimeError, match="execution failed"):
+                    process_job.run(job_id)
+
+    execute_mock.assert_called_once()
+    session_factory_mock.return_value.close.assert_called_once()

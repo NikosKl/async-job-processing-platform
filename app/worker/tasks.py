@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.db.session import DBSession
+from app.services.job_execution_service import execute_claimed_job
 from app.services.job_service import claim_job_for_execution
 from app.services.outbox_publisher import publish_outbox_batch
 from app.worker.celery_app import celery_app
@@ -45,5 +46,16 @@ def process_job(job_id: str) -> None:
 
         if claim is None:
             return
+
+        execution_token = claim.execution_token
+
+        if execution_token is None:
+            raise RuntimeError("claimed job is missing execution token")
+
+        execute_claimed_job(
+            db=db,
+            job_id=parsed_job_id,
+            execution_token=execution_token,
+        )
     finally:
         db.close()
