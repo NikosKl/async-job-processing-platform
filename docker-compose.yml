@@ -15,6 +15,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:8.10-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   migrate:
     build: .
     command: alembic upgrade head
@@ -37,5 +51,26 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       ENVIRONMENT: ${ENVIRONMENT:-development}
 
+  worker:
+    build: .
+    command:
+      [
+      "celery",
+      "--app",
+      "app.worker.celery_app:celery_app",
+      "worker",
+      "--loglevel=INFO"
+      ]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
+  redis_data:

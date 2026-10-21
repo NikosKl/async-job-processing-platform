@@ -1,14 +1,18 @@
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.security import create_access_token, hash_password
+from app.models import RepositoryAnalysisItem
 from app.repositories.user import create_user
+from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
+from app.services.job_service import claim_job_for_execution, submit_job
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env.test")
@@ -87,3 +91,43 @@ def authenticated_user_factory(db_session):
         return user, headers
 
     return create_authenticated_user
+
+
+@pytest.fixture()
+def claimed_job_factory(db_session, authenticated_user_factory):
+    def create_claimed_job(
+        repositories: list[str], claim_time: datetime, idempotency_key: str
+    ):
+        user, headers = authenticated_user_factory("user@example.com", "password123")
+
+        request = CreateJobRequest(
+            type="repository_batch_analysis",
+            input=RepositoryBatchAnalysisInput(
+                repositories=repositories,
+            ),
+        )
+
+        job = submit_job(
+            db_session, user.id, request=request, idempotency_key=idempotency_key
+        )
+
+        lease_duration = timedelta(minutes=10)
+
+        claimed_job = claim_job_for_execution(
+            db=db_session,
+            job_id=job.id,
+            claim_time=claim_time,
+            lease_duration=lease_duration,
+        )
+
+        assert claimed_job is not None
+        assert claimed_job.execution_token is not None
+
+        stmt = select(RepositoryAnalysisItem).where(
+            RepositoryAnalysisItem.job_id == job.id
+        )
+        items = db_session.scalars(stmt).all()
+
+        return user, headers, claimed_job, items
+
+    return create_claimed_job
