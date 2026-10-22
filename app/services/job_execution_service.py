@@ -1,5 +1,4 @@
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -7,18 +6,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
+from app.domain.repository_analysis import RepositoryAnalysisResult
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.repositories.job import increment_job_progress
 from app.repositories.repository_analysis_item import persist_successful_item_result
-
-
-@dataclass
-class RepositoryAnalysisResult:
-    owner: str
-    repository: str
-    stars: int
-    forks: int
-    open_issues: int
 
 
 def run_fake_repository_analysis(

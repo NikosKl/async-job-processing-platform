@@ -8,9 +8,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
+from app.domain.repository_analysis import RepositoryAnalysisResult
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.services.job_execution_service import (
-    RepositoryAnalysisResult,
     complete_claimed_job,
     execute_claimed_job,
     save_item_result_and_update_progress,

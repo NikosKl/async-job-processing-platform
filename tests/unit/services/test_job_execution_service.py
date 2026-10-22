@@ -7,8 +7,8 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.enums import RepositoryStatus
+from app.domain.repository_analysis import RepositoryAnalysisResult
 from app.services.job_execution_service import (
-    RepositoryAnalysisResult,
     execute_claimed_job,
     run_fake_repository_analysis,
 )
