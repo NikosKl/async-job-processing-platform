@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobStatus, JobType
@@ -84,6 +84,7 @@ def claim_job(
         )
         .values(
             status=JobStatus.RUNNING,
+            started_at=func.coalesce(Job.started_at, claim_time),
             attempt_count=Job.attempt_count + 1,
             execution_token=execution_token,
             lease_expires_at=lease_expires_at,

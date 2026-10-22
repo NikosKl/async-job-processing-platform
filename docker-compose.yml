@@ -71,6 +71,26 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  beat:
+    build: .
+    command:
+      [
+        "celery",
+        "--app",
+        "app.worker.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO"
+      ]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
   redis_data:

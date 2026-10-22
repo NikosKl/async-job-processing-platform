@@ -319,6 +319,7 @@ def test_claim_job_claims_queued_job(db_session, authenticated_user_factory):
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.started_at == claim_time
     assert claimed_job.attempt_count == 1
     assert claimed_job.execution_token == execution_token
     assert claimed_job.lease_expires_at == lease_expires_at
@@ -345,8 +346,10 @@ def test_claim_job_claims_due_retry_at_exact_boundary(
     claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
     execution_token = uuid.uuid4()
     lease_expires_at = claim_time + timedelta(minutes=10)
+    original_started_at = claim_time - timedelta(minutes=15)
 
     job.status = JobStatus.RETRYING
+    job.started_at = original_started_at
     job.next_attempt_at = claim_time
     job.attempt_count = 1
 
@@ -362,6 +365,7 @@ def test_claim_job_claims_due_retry_at_exact_boundary(
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.started_at == original_started_at
     assert claimed_job.attempt_count == 2
     assert claimed_job.execution_token == execution_token
     assert claimed_job.lease_expires_at == lease_expires_at
@@ -388,8 +392,10 @@ def test_claim_job_returns_none_for_future_retry(
     claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
     execution_token = uuid.uuid4()
     lease_expires_at = claim_time + timedelta(minutes=10)
+    original_started_at = claim_time - timedelta(minutes=15)
 
     job.status = JobStatus.RETRYING
+    job.started_at = original_started_at
     job.next_attempt_at = claim_time + timedelta(minutes=5)
     job.attempt_count = 1
 
@@ -405,6 +411,7 @@ def test_claim_job_returns_none_for_future_retry(
 
     assert claimed_job is None
     assert job.status == JobStatus.RETRYING
+    assert job.started_at == original_started_at
     assert job.attempt_count == 1
     assert job.execution_token is None
     assert job.lease_expires_at is None
@@ -550,6 +557,7 @@ def test_claim_job_rollback_restores_original_state(
     original_execution_token = job.execution_token
     original_lease_expires_at = job.lease_expires_at
     original_next_attempt_at = job.next_attempt_at
+    original_started_at = job.started_at
 
     claimed_job = claim_job(
         db=db_session,
@@ -561,6 +569,7 @@ def test_claim_job_rollback_restores_original_state(
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.started_at == claim_time
     assert claimed_job.attempt_count == 1
     assert claimed_job.execution_token == execution_token
     assert claimed_job.lease_expires_at == lease_expires_at
@@ -572,6 +581,7 @@ def test_claim_job_rollback_restores_original_state(
 
     assert job.status == original_status
     assert job.attempt_count == original_attempt_count
+    assert job.started_at == original_started_at
     assert job.execution_token == original_execution_token
     assert job.lease_expires_at == original_lease_expires_at
     assert job.next_attempt_at == original_next_attempt_at

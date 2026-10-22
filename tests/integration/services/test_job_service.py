@@ -794,8 +794,10 @@ def test_claim_job_for_execution_due_retry_creates_next_attempt(
 
     claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
     lease_duration = timedelta(minutes=10)
+    original_started_at = claim_time - timedelta(minutes=15)
 
     job.status = JobStatus.RETRYING
+    job.started_at = original_started_at
     job.attempt_count = 1
     job.next_attempt_at = claim_time
 
@@ -810,6 +812,7 @@ def test_claim_job_for_execution_due_retry_creates_next_attempt(
 
     assert claimed_job is not None
     assert claimed_job.status == JobStatus.RUNNING
+    assert claimed_job.started_at == original_started_at
     assert claimed_job.attempt_count == 2
     assert claimed_job.next_attempt_at is None
 

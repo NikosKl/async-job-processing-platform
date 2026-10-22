@@ -80,7 +80,9 @@ def test_process_job_completes_queued_job(test_session_factory):
             "succeeded": 2,
             "failed": 0,
         }
+        assert job.started_at is not None
         assert job.finished_at is not None
+        assert job.started_at <= job.finished_at
         assert job.execution_token is None
         assert job.lease_expires_at is None
 
