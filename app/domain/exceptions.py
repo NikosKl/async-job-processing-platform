@@ -16,3 +16,7 @@ class InvalidCredentialsError(Exception):
 
 class InvalidAccessTokenError(Exception):
     pass
+
+
+class InvalidRepositoryResponseError(Exception):
+    pass

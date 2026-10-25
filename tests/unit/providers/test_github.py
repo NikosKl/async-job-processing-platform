@@ -3,8 +3,11 @@ import asyncio
 import httpx
 import pytest
 
+from app.domain.exceptions import InvalidRepositoryResponseError
 from app.domain.repository_analysis import RepositoryAnalysisResult
 from app.providers.github import GitHubClient
+
+# HANDLERS
 
 
 def successful_repo_handler(request: httpx.Request) -> httpx.Response:
@@ -66,6 +69,36 @@ def missing_field_handler(request: httpx.Request) -> httpx.Response:
             "open_issues_count": 5,
         },
     )
+
+
+def invalid_json_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        status_code=200,
+        content="{invalid json}",
+    )
+
+
+def non_object_json_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(status_code=200, json=["fastapi", "sqlalchemy"])
+
+
+def extra_fields_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        status_code=200,
+        json={
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "description": "A Python web framework",
+            "language": "Python",
+            "html_url": "https://github.com/fastapi/fastapi",
+        },
+    )
+
+
+# TESTS
 
 
 def test_github_client_sends_correct_request():
@@ -153,7 +186,141 @@ def test_github_client_raises_on_missing_required_field():
         async with httpx.AsyncClient(transport=transport) as client:
             github_client = GitHubClient(client)
 
-            with pytest.raises(KeyError, match="stargazers_count"):
+            with pytest.raises(InvalidRepositoryResponseError):
                 await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "metric",
+    ["stargazers_count", "forks_count", "open_issues_count"],
+)
+@pytest.mark.parametrize("invalid_value", [None, "100", True, 1.5, -1])
+def test_github_client_rejects_invalid_metrics(metric, invalid_value):
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            metric: invalid_value,
+        }
+
+        return httpx.Response(status_code=200, json=data)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("field", ["login", "name"])
+@pytest.mark.parametrize("invalid_value", [None, "", "   ", 123, True])
+def test_github_client_rejects_invalid_identifiers(field, invalid_value):
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "owner": {"login": invalid_value if field == "login" else "fastapi"},
+            "name": invalid_value if field == "name" else "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=data)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("missing_field", ["owner", "login", "name"])
+def test_github_client_rejects_missing_identifiers(missing_field):
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        if missing_field == "owner":
+            del data["owner"]
+        elif missing_field == "login":
+            del data["owner"]["login"]
+        else:
+            del data["name"]
+
+        return httpx.Response(status_code=200, json=data)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_rejects_invalid_json():
+    transport = httpx.MockTransport(invalid_json_handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_rejects_non_object_json():
+    transport = httpx.MockTransport(non_object_json_handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_ignores_extra_fields():
+    transport = httpx.MockTransport(extra_fields_handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            result = await github_client.get_repository("fastapi", "fastapi")
+
+        assert isinstance(result, RepositoryAnalysisResult)
+        assert result.owner == "fastapi"
+        assert result.repository == "fastapi"
+        assert result.stars == 100
+        assert result.forks == 20
+        assert result.open_issues == 5
 
     asyncio.run(run_test())

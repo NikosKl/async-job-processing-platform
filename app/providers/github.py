@@ -1,6 +1,32 @@
-import httpx
+import json
+from typing import Annotated
 
+import httpx
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
+
+from app.domain.exceptions import InvalidRepositoryResponseError
 from app.domain.repository_analysis import RepositoryAnalysisResult
+
+Identifier = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=1,
+        strip_whitespace=True,
+    ),
+]
+
+
+class GitHubOwnerResponse(BaseModel):
+    login: Identifier
+
+
+class GitHubRepositoryResponse(BaseModel):
+    owner: GitHubOwnerResponse
+    name: Identifier
+    stargazers_count: int = Field(strict=True, ge=0)
+    forks_count: int = Field(strict=True, ge=0)
+    open_issues_count: int = Field(strict=True, ge=0)
 
 
 class GitHubClient:
@@ -19,12 +45,18 @@ class GitHubClient:
 
         response.raise_for_status()
 
-        data = response.json()
+        try:
+            data = response.json()
+            validated_data = GitHubRepositoryResponse.model_validate(data)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise InvalidRepositoryResponseError(
+                "Invalid GitHub repository response"
+            ) from exc
 
         return RepositoryAnalysisResult(
-            owner=data["owner"]["login"],
-            repository=data["name"],
-            stars=data["stargazers_count"],
-            forks=data["forks_count"],
-            open_issues=data["open_issues_count"],
+            owner=validated_data.owner.login,
+            repository=validated_data.name,
+            stars=validated_data.stargazers_count,
+            forks=validated_data.forks_count,
+            open_issues=validated_data.open_issues_count,
         )
