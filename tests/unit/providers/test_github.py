@@ -3,7 +3,11 @@ import asyncio
 import httpx
 import pytest
 
-from app.domain.exceptions import InvalidRepositoryResponseError
+from app.domain.exceptions import (
+    GitHubUnavailableError,
+    InvalidRepositoryResponseError,
+    RepositoryUnavailableError,
+)
 from app.domain.repository_analysis import RepositoryAnalysisResult
 from app.providers.github import GitHubClient
 
@@ -53,10 +57,6 @@ def not_found_handler(request: httpx.Request) -> httpx.Response:
             "message": "Not Found",
         },
     )
-
-
-def timeout_handler(request: httpx.Request) -> httpx.Response:
-    raise httpx.ReadTimeout("Read timeout", request=request)
 
 
 def missing_field_handler(request: httpx.Request) -> httpx.Response:
@@ -158,23 +158,33 @@ def test_github_client_raises_on_404_response():
         async with httpx.AsyncClient(transport=transport) as client:
             github_client = GitHubClient(client)
 
-            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            with pytest.raises(RepositoryUnavailableError) as exc_info:
                 await github_client.get_repository("fastapi", "fastapi")
 
-            assert exc_info.value.response.status_code == 404
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+            assert exc_info.value.__cause__.response.status_code == 404
 
     asyncio.run(run_test())
 
 
-def test_github_client_propagates_timeout():
+@pytest.mark.parametrize(
+    "error_type", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError]
+)
+def test_github_client_translates_transport_errors(error_type):
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise error_type("Connection failed", request=request)
+
     transport = httpx.MockTransport(timeout_handler)
 
     async def run_test():
         async with httpx.AsyncClient(transport=transport) as client:
             github_client = GitHubClient(client)
 
-            with pytest.raises(httpx.ReadTimeout):
+            with pytest.raises(GitHubUnavailableError) as exc_info:
                 await github_client.get_repository("fastapi", "fastapi")
+
+            assert isinstance(exc_info.value.__cause__, error_type)
 
     asyncio.run(run_test())
 
@@ -322,5 +332,44 @@ def test_github_client_ignores_extra_fields():
         assert result.stars == 100
         assert result.forks == 20
         assert result.open_issues == 5
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503])
+def test_github_client_raises_on_server_error(status_code):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=status_code, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubUnavailableError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+            assert exc_info.value.__cause__.response.status_code == status_code
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_github_client_preserves_other_http_errors(status_code):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=status_code, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.response.status_code == status_code
 
     asyncio.run(run_test())

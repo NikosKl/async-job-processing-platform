@@ -20,3 +20,11 @@ class InvalidAccessTokenError(Exception):
 
 class InvalidRepositoryResponseError(Exception):
     pass
+
+
+class RepositoryUnavailableError(Exception):
+    pass
+
+
+class GitHubUnavailableError(Exception):
+    pass

@@ -4,7 +4,11 @@ from typing import Annotated
 import httpx
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
 
-from app.domain.exceptions import InvalidRepositoryResponseError
+from app.domain.exceptions import (
+    GitHubUnavailableError,
+    InvalidRepositoryResponseError,
+    RepositoryUnavailableError,
+)
 from app.domain.repository_analysis import RepositoryAnalysisResult
 
 Identifier = Annotated[
@@ -37,13 +41,23 @@ class GitHubClient:
         self, owner: str, repository: str
     ) -> RepositoryAnalysisResult:
 
-        response = await self._client.get(
-            f"https://api.github.com/repos/{owner}/{repository}",
-            timeout=10.0,
-            follow_redirects=False,
-        )
+        try:
+            response = await self._client.get(
+                f"https://api.github.com/repos/{owner}/{repository}",
+                timeout=10.0,
+                follow_redirects=False,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            raise GitHubUnavailableError() from exc
 
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RepositoryUnavailableError() from exc
+            if exc.response.is_server_error:
+                raise GitHubUnavailableError() from exc
+            raise
 
         try:
             data = response.json()
