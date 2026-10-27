@@ -34,16 +34,29 @@ class GitHubRepositoryResponse(BaseModel):
 
 
 class GitHubClient:
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient, token: str | None = None) -> None:
         self._client = client
+        self._token = token
 
     async def get_repository(
         self, owner: str, repository: str
     ) -> RepositoryAnalysisResult:
 
+        url = f"https://api.github.com/repos/{owner}/{repository}"
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2026-03-10",
+            "User-Agent": "async-job-processing-platform",
+        }
+
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+
         try:
             response = await self._client.get(
-                f"https://api.github.com/repos/{owner}/{repository}",
+                url=url,
+                headers=headers,
                 timeout=10.0,
                 follow_redirects=False,
             )

@@ -373,3 +373,133 @@ def test_github_client_preserves_other_http_errors(status_code):
             assert exc_info.value.response.status_code == status_code
 
     asyncio.run(run_test())
+
+
+def test_github_client_sends_required_headers():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept"] == "application/vnd.github+json"
+        assert request.headers["User-Agent"] == "async-job-processing-platform"
+        assert request.headers["X-GitHub-Api-Version"] == "2026-03-10"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_sends_bearer_token():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client, token="fake-token-123")
+
+            await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_does_not_send_authorization_without_token():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "Authorization" not in request.headers
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_does_not_send_authorization_with_empty_token():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "Authorization" not in request.headers
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client, token="")
+
+            await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_does_not_modify_client_headers():
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            original_headers = client.headers.copy()
+
+            github_client = GitHubClient(client, token="fake-token-123")
+
+            await github_client.get_repository("fastapi", "fastapi")
+
+            assert client.headers == original_headers
+
+    asyncio.run(run_test())
