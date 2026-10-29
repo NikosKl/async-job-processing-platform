@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     jwt_algorithm: Literal["HS256"] = "HS256"
     access_token_expire_minutes: int = 30
 
+    github_token: str | None = None
+
     celery_broker_url: str = "redis://localhost:6379/0"
 
     model_config = SettingsConfigDict(
