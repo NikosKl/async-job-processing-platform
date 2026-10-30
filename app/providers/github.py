@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
@@ -87,3 +89,13 @@ class GitHubClient:
             forks=validated_data.forks_count,
             open_issues=validated_data.open_issues_count,
         )
+
+
+@asynccontextmanager
+async def github_client_context(
+    token: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> AsyncIterator[GitHubClient]:
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        yield GitHubClient(client, token)

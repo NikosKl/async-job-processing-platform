@@ -9,7 +9,7 @@ from app.domain.exceptions import (
     RepositoryUnavailableError,
 )
 from app.domain.repository_analysis import RepositoryAnalysisResult
-from app.providers.github import GitHubClient
+from app.providers.github import GitHubClient, github_client_context
 
 # HANDLERS
 
@@ -501,5 +501,165 @@ def test_github_client_does_not_modify_client_headers():
             await github_client.get_repository("fastapi", "fastapi")
 
             assert client.headers == original_headers
+
+    asyncio.run(run_test())
+
+
+def test_github_client_context_uses_supplied_token():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with github_client_context(
+            token="fake-token-123",
+            transport=transport,
+        ) as github:
+            await github.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_context_reuses_http_client():
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with github_client_context(
+            token="fake-token-123",
+            transport=transport,
+        ) as github:
+            original_client = github._client
+
+            await github.get_repository("fastapi", "fastapi")
+            await github.get_repository("sqlalchemy", "sqlalchemy")
+
+        assert github._client is original_client
+        assert len(requests) == 2
+
+    asyncio.run(run_test())
+
+
+def test_github_client_context_closes_http_client_on_exit():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with github_client_context(
+            token="fake-token-123",
+            transport=transport,
+        ) as github:
+            client = github._client
+            assert not client.is_closed
+
+            await github.get_repository("fastapi", "fastapi")
+
+        assert client.is_closed
+
+    asyncio.run(run_test())
+
+
+def test_github_client_context_closes_http_client_on_exception():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        with pytest.raises(RuntimeError):
+            async with github_client_context(
+                token="fake-token-123",
+                transport=transport,
+            ) as github:
+                client = github._client
+                assert not client.is_closed
+
+                raise RuntimeError("test failure")
+
+        assert client.is_closed
+
+    asyncio.run(run_test())
+
+
+def test_github_client_context_creates_separate_http_clients():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer fake-token-123"
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with github_client_context(
+            token="fake-token-123",
+            transport=transport,
+        ) as github:
+            client_a = github._client
+
+        async with github_client_context(
+            token="fake-token-123",
+            transport=transport,
+        ) as github:
+            client_b = github._client
+
+        assert client_a is not client_b
 
     asyncio.run(run_test())
