@@ -1,4 +1,5 @@
 import uuid
+from contextlib import aclosing
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -6,10 +7,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
-from app.domain.repository_analysis import RepositoryAnalysisResult
+from app.domain.repository_analysis import RepositoryAnalysisResult, RepositoryAnalysisItemInput
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.repositories.job import increment_job_progress
 from app.repositories.repository_analysis_item import persist_successful_item_result
+from app.services.repository_analysis_handler import RepositoryProvider, analyze_repositories
 
 
 def run_fake_repository_analysis(
@@ -202,3 +204,64 @@ def execute_claimed_job(
         execution_token=execution_token,
         completed_at=job_completed_at,
     )
+
+async def execute_claimed_job_async(
+    db: Session,
+    job_id: uuid.UUID,
+    execution_token: uuid.UUID,
+    github_client: RepositoryProvider,
+) -> bool:
+    stmt = (
+        select(RepositoryAnalysisItem)
+        .where(
+            RepositoryAnalysisItem.job_id == job_id,
+            RepositoryAnalysisItem.status == RepositoryStatus.PENDING,
+        )
+        .order_by(RepositoryAnalysisItem.position)
+    )
+    items = db.scalars(stmt).all()
+
+    analysis_inputs = []
+
+    for item in items:
+        analysis_item = RepositoryAnalysisItemInput(
+            item_id=item.id,
+            owner=item.owner,
+            repository=item.repository_name,
+        )
+        analysis_inputs.append(analysis_item)
+
+    async with aclosing(
+            analyze_repositories(github_client, analysis_inputs)
+    ) as results:
+        async for item_id, result in results:
+            completed_at = datetime.now(UTC)
+
+            saved_item = save_item_result_and_update_progress(
+                db=db,
+                job_id=job_id,
+                item_id=item_id,
+                execution_token=execution_token,
+                analysis_result=result,
+                completed_at=completed_at,
+            )
+
+            if not saved_item:
+                return False
+
+    job_completed_at = datetime.now(UTC)
+
+    completed_job = complete_claimed_job(
+        db=db,
+        job_id=job_id,
+        execution_token=execution_token,
+        completed_at=job_completed_at,
+    )
+
+    return completed_job
+
+
+
+
+
+
