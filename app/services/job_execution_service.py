@@ -7,11 +7,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
-from app.domain.repository_analysis import RepositoryAnalysisResult, RepositoryAnalysisItemInput
+from app.domain.repository_analysis import (
+    RepositoryAnalysisItemInput,
+    RepositoryAnalysisResult,
+)
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.repositories.job import increment_job_progress
 from app.repositories.repository_analysis_item import persist_successful_item_result
-from app.services.repository_analysis_handler import RepositoryProvider, analyze_repositories
+from app.services.repository_analysis_handler import (
+    RepositoryProvider,
+    analyze_repositories,
+)
 
 
 def run_fake_repository_analysis(
@@ -205,6 +211,7 @@ def execute_claimed_job(
         completed_at=job_completed_at,
     )
 
+
 async def execute_claimed_job_async(
     db: Session,
     job_id: uuid.UUID,
@@ -232,7 +239,7 @@ async def execute_claimed_job_async(
         analysis_inputs.append(analysis_item)
 
     async with aclosing(
-            analyze_repositories(github_client, analysis_inputs)
+        analyze_repositories(github_client, analysis_inputs)
     ) as results:
         async for item_id, result in results:
             completed_at = datetime.now(UTC)
@@ -259,9 +266,3 @@ async def execute_claimed_job_async(
     )
 
     return completed_job
-
-
-
-
-
-

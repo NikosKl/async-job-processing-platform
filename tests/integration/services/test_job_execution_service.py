@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.services.job_execution_service import (
     complete_claimed_job,
     execute_claimed_job,
+    execute_claimed_job_async,
     save_item_result_and_update_progress,
 )
 
@@ -1182,3 +1184,192 @@ def test_execute_claimed_job_skips_existing_terminal_items(
     assert failed_item.attempt_count == 3
     assert failed_item.error_type == "AnalysisError"
     assert failed_item.error_message == "existing failure"
+
+
+def test_execute_claimed_job_async_persists_results_and_completes_job(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime.now(UTC)
+
+    _, _, claimed_job, _ = claimed_job_factory(
+        repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy"],
+        claim_time=claim_time,
+        idempotency_key="async-execution-test",
+    )
+
+    job_id = claimed_job.id
+    execution_token = claimed_job.execution_token
+
+    assert execution_token is not None
+
+    class FakeGitHubClient:
+        @staticmethod
+        async def get_repository(
+            owner: str, repository: str
+        ) -> RepositoryAnalysisResult:
+            if repository == "fastapi":
+                stars, forks, open_issues = 100, 50, 7
+            elif repository == "sqlalchemy":
+                stars, forks, open_issues = 200, 80, 12
+            else:
+                raise AssertionError(f"Unexpected repository: {repository}")
+
+            return RepositoryAnalysisResult(
+                owner=owner,
+                repository=repository,
+                stars=stars,
+                forks=forks,
+                open_issues=open_issues,
+            )
+
+    result = asyncio.run(
+        execute_claimed_job_async(
+            db=db_session,
+            job_id=job_id,
+            execution_token=execution_token,
+            github_client=FakeGitHubClient(),
+        )
+    )
+
+    assert result is True
+
+    db_session.expire_all()
+
+    job = db_session.scalars(select(Job).where(Job.id == job_id)).one()
+
+    assert job.status == JobStatus.COMPLETED
+    assert job.progress_total == 2
+    assert job.progress_completed == 2
+    assert job.result_summary == {
+        "total": 2,
+        "succeeded": 2,
+        "failed": 0,
+    }
+    assert job.finished_at is not None
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+    items = db_session.scalars(
+        select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job_id)
+    ).all()
+
+    assert len(items) == 2
+
+    expected_metrics = {
+        "fastapi": (100, 50, 7),
+        "sqlalchemy": (200, 80, 12),
+    }
+
+    for item in items:
+        assert item.status == RepositoryStatus.SUCCEEDED
+        assert item.completed_at is not None
+
+        assert (
+            item.stars,
+            item.forks,
+            item.open_issues,
+        ) == expected_metrics[item.repository_name]
+
+    attempt = db_session.scalars(
+        select(JobAttempt).where(
+            JobAttempt.job_id == job_id,
+            JobAttempt.attempt_number == job.attempt_count,
+        )
+    ).one()
+
+    assert attempt.status == JobAttemptStatus.SUCCEEDED
+    assert attempt.finished_at is not None
+    assert attempt.execution_token == execution_token
+
+
+def test_execute_claimed_job_async_preserves_terminal_items(
+    db_session, claimed_job_factory
+):
+    _, _, job, items = claimed_job_factory(
+        repositories=["owner/pending", "owner/succeeded", "owner/failed"],
+        claim_time=datetime.now(UTC),
+        idempotency_key="async-terminal-items",
+    )
+
+    job_id = job.id
+    token = job.execution_token
+    assert token is not None
+
+    items_by_name = {item.repository_name: item for item in items}
+    succeeded = items_by_name["succeeded"]
+    failed = items_by_name["failed"]
+
+    completed_at = datetime.now(UTC)
+
+    succeeded.status = RepositoryStatus.SUCCEEDED
+    succeeded.stars = 100
+    succeeded.forks = 20
+    succeeded.open_issues = 5
+    succeeded.attempt_count = 2
+    succeeded.completed_at = completed_at
+
+    failed.status = RepositoryStatus.FAILED
+    failed.attempt_count = 3
+    failed.completed_at = completed_at
+    failed.error_type = "AnalysisError"
+    failed.error_message = "existing failure"
+
+    db_session.commit()
+
+    def snapshot(item):
+        return (
+            item.status,
+            item.stars,
+            item.forks,
+            item.open_issues,
+            item.error_type,
+            item.error_message,
+            item.completed_at,
+            item.attempt_count,
+        )
+
+    original_terminal_items = {item.id: snapshot(item) for item in [succeeded, failed]}
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(
+            self, owner: str, repository: str
+        ) -> RepositoryAnalysisResult:
+            self.calls.append((owner, repository))
+            return RepositoryAnalysisResult(owner, repository, 10, 5, 2)
+
+    provider = FakeProvider()
+
+    result = asyncio.run(
+        execute_claimed_job_async(
+            db=db_session,
+            job_id=job_id,
+            execution_token=token,
+            github_client=provider,
+        )
+    )
+
+    assert result is True
+    assert provider.calls == [("owner", "pending")]
+
+    db_session.expire_all()
+
+    persisted_items = db_session.scalars(
+        select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job_id)
+    ).all()
+
+    for item in persisted_items:
+        if item.id in original_terminal_items:
+            assert snapshot(item) == original_terminal_items[item.id]
+
+    persisted_job = db_session.get(Job, job_id)
+    assert persisted_job is not None
+    assert persisted_job.status == JobStatus.COMPLETED
+    assert persisted_job.progress_completed == 3
+    assert persisted_job.result_summary == {
+        "total": 3,
+        "succeeded": 2,
+        "failed": 1,
+    }
