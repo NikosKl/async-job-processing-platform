@@ -1,9 +1,12 @@
+from functools import partial
 from unittest.mock import patch
 
+import httpx
 from sqlalchemy import select
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
+from app.providers.github import github_client_context
 from app.repositories.user import create_user
 from app.schemas.jobs import CreateJobRequest, RepositoryBatchAnalysisInput
 from app.services.job_request import hash_job_request
@@ -12,6 +15,32 @@ from app.worker.tasks import process_job
 
 
 def test_process_job_completes_queued_job(test_session_factory):
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        if http_request.url.path == "/repos/fastapi/fastapi":
+            owner, repo = "fastapi", "fastapi"
+            stars, forks, open_issues = 100, 20, 5
+
+        elif http_request.url.path == "/repos/sqlalchemy/sqlalchemy":
+            owner, repo = "sqlalchemy", "sqlalchemy"
+            stars, forks, open_issues = 250, 50, 10
+
+        else:
+            raise AssertionError(f"Unexpected GitHub request: {http_request.url}")
+
+        return httpx.Response(
+            status_code=200,
+            json={
+                "owner": {"login": owner},
+                "name": repo,
+                "stargazers_count": stars,
+                "forks_count": forks,
+                "open_issues_count": open_issues,
+            },
+            request=http_request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
     request = CreateJobRequest(
         type="repository_batch_analysis",
         input=RepositoryBatchAnalysisInput(
@@ -48,7 +77,11 @@ def test_process_job_completes_queued_job(test_session_factory):
         assert job.attempt_count == 0
 
     with patch("app.worker.tasks.DBSession", new=test_session_factory):
-        process_job.run(str(job_id))
+        with patch(
+            "app.worker.tasks.github_client_context",
+            new=partial(github_client_context, transport=transport),
+        ):
+            process_job.run(str(job_id))
 
     with test_session_factory() as db:
         stmt = select(Job).where(Job.id == job_id)
@@ -64,11 +97,21 @@ def test_process_job_completes_queued_job(test_session_factory):
 
         assert len(analysis_items) == 2
 
+        expected_metrics = {
+            "fastapi": (100, 20, 5),
+            "sqlalchemy": (250, 50, 10),
+        }
+
         for item in analysis_items:
             assert item.status == RepositoryStatus.SUCCEEDED
-            assert item.stars == 0
-            assert item.forks == 0
-            assert item.open_issues == 0
+
+            expected_stars, expected_forks, expected_issues = expected_metrics[
+                item.repository_name
+            ]
+
+            assert item.stars == expected_stars
+            assert item.forks == expected_forks
+            assert item.open_issues == expected_issues
             assert item.completed_at is not None
 
         assert job.status == JobStatus.COMPLETED
@@ -96,6 +139,36 @@ def test_process_job_completes_queued_job(test_session_factory):
 
 
 def test_process_job_does_not_reexecute_completed_job(test_session_factory):
+    http_requests = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        http_requests.append(http_request.url.path)
+
+        if http_request.url.path == "/repos/fastapi/fastapi":
+            owner, repo = "fastapi", "fastapi"
+            stars, forks, open_issues = 100, 20, 5
+
+        elif http_request.url.path == "/repos/sqlalchemy/sqlalchemy":
+            owner, repo = "sqlalchemy", "sqlalchemy"
+            stars, forks, open_issues = 250, 50, 10
+
+        else:
+            raise AssertionError(f"Unexpected GitHub request: {http_request.url}")
+
+        return httpx.Response(
+            status_code=200,
+            json={
+                "owner": {"login": owner},
+                "name": repo,
+                "stargazers_count": stars,
+                "forks_count": forks,
+                "open_issues_count": open_issues,
+            },
+            request=http_request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
     request = CreateJobRequest(
         type="repository_batch_analysis",
         input=RepositoryBatchAnalysisInput(
@@ -125,7 +198,13 @@ def test_process_job_does_not_reexecute_completed_job(test_session_factory):
         db.commit()
 
     with patch("app.worker.tasks.DBSession", new=test_session_factory):
-        process_job.run(str(job_id))
+        with patch(
+            "app.worker.tasks.github_client_context",
+            new=partial(github_client_context, transport=transport),
+        ):
+            process_job.run(str(job_id))
+
+            assert len(http_requests) == 2
 
     with test_session_factory() as db:
         stmt = select(Job).where(Job.id == job_id)
@@ -162,7 +241,13 @@ def test_process_job_does_not_reexecute_completed_job(test_session_factory):
         ]
 
     with patch("app.worker.tasks.DBSession", new=test_session_factory):
-        process_job.run(str(job_id))
+        with patch(
+            "app.worker.tasks.github_client_context",
+            new=partial(github_client_context, transport=transport),
+        ):
+            process_job.run(str(job_id))
+
+            assert len(http_requests) == 2
 
     with test_session_factory() as db:
         stmt = select(Job).where(Job.id == job_id)

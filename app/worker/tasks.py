@@ -1,8 +1,15 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
 from app.db.session import DBSession
-from app.services.job_execution_service import execute_claimed_job
+from app.providers.github import github_client_context
+from app.services.job_execution_service import (
+    execute_claimed_job_async,
+)
 from app.services.job_service import claim_job_for_execution
 from app.services.outbox_publisher import publish_outbox_batch
 from app.worker.celery_app import celery_app
@@ -26,6 +33,22 @@ def run_outbox_publisher_batch():
         )
     finally:
         db.close()
+
+
+async def _execute_job_with_github(
+    db: Session,
+    job_id: UUID,
+    execution_token: UUID,
+) -> None:
+    async with github_client_context(
+        token=settings.github_token,
+    ) as github_client:
+        await execute_claimed_job_async(
+            db=db,
+            job_id=job_id,
+            execution_token=execution_token,
+            github_client=github_client,
+        )
 
 
 @celery_app.task(name="process_job")
@@ -52,10 +75,12 @@ def process_job(job_id: str) -> None:
         if execution_token is None:
             raise RuntimeError("claimed job is missing execution token")
 
-        execute_claimed_job(
-            db=db,
-            job_id=parsed_job_id,
-            execution_token=execution_token,
+        asyncio.run(
+            _execute_job_with_github(
+                db=db,
+                job_id=parsed_job_id,
+                execution_token=execution_token,
+            )
         )
     finally:
         db.close()

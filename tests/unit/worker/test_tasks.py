@@ -1,11 +1,17 @@
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.worker.celery_app import celery_app
-from app.worker.tasks import OUTBOX_BATCH_SIZE, process_job, run_outbox_publisher_batch
+from app.worker.tasks import (
+    OUTBOX_BATCH_SIZE,
+    _execute_job_with_github,
+    process_job,
+    run_outbox_publisher_batch,
+)
 
 
 def test_run_outbox_publisher_batch_is_registered():
@@ -88,7 +94,9 @@ def test_process_job_passes_uuid_to_claim_service():
 
     with patch("app.worker.tasks.DBSession"):
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-            with patch("app.worker.tasks.execute_claimed_job"):
+            with patch(
+                "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+            ):
                 process_job.run(parsed_job_id)
 
             called_id = claim_mock.call_args.kwargs["job_id"]
@@ -106,7 +114,9 @@ def test_process_job_passes_utc_time_and_lease_duration():
 
         with patch("app.worker.tasks.DBSession"):
             with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-                with patch("app.worker.tasks.execute_claimed_job"):
+                with patch(
+                    "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+                ):
                     process_job.run(job_id)
 
     called_claim_time = claim_mock.call_args.kwargs["claim_time"]
@@ -126,7 +136,9 @@ def test_process_job_unsuccessful_claim_returns_normally():
         with patch(
             "app.worker.tasks.claim_job_for_execution", return_value=None
         ) as claim_mock:
-            with patch("app.worker.tasks.execute_claimed_job") as execute_mock:
+            with patch(
+                "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+            ) as execute_mock:
                 process_job.run(job_id)
 
     claim_mock.assert_called_once()
@@ -139,7 +151,9 @@ def test_process_job_closes_session_after_success():
     with patch("app.worker.tasks.DBSession") as session_factory_mock:
         fake_session = session_factory_mock.return_value
         with patch("app.worker.tasks.claim_job_for_execution"):
-            with patch("app.worker.tasks.execute_claimed_job"):
+            with patch(
+                "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+            ):
                 process_job.run(job_id)
 
         fake_session.close.assert_called_once()
@@ -182,7 +196,9 @@ def test_process_job_uses_separate_sessions():
         session_factory_mock.side_effect = [session_a, session_b]
 
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-            with patch("app.worker.tasks.execute_claimed_job"):
+            with patch(
+                "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+            ):
                 for _ in range(2):
                     process_job.run(job_id)
 
@@ -211,7 +227,9 @@ def test_process_job_uses_fresh_claim_time_per_invocation():
 
         with patch("app.worker.tasks.DBSession"):
             with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
-                with patch("app.worker.tasks.execute_claimed_job"):
+                with patch(
+                    "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+                ):
                     process_job.run(job_id)
                     process_job.run(job_id)
 
@@ -231,10 +249,12 @@ def test_process_job_successful_claim_calls_execution_service():
     with patch("app.worker.tasks.DBSession") as session_factory_mock:
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
             claim_mock.return_value.execution_token = execution_token
-            with patch("app.worker.tasks.execute_claimed_job") as execute_mock:
+            with patch(
+                "app.worker.tasks._execute_job_with_github", new_callable=AsyncMock
+            ) as execute_mock:
                 process_job.run(job_id)
 
-    execute_mock.assert_called_once()
+    execute_mock.assert_awaited_once()
 
     called_kwargs = execute_mock.call_args.kwargs
 
@@ -257,13 +277,17 @@ def test_process_job_closes_session_after_execution(execution_result):
     with patch("app.worker.tasks.DBSession") as session_factory_mock:
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
             claim_mock.return_value.execution_token = execution_token
-            with patch(
-                "app.worker.tasks.execute_claimed_job", return_value=execution_result
-            ) as execute_mock:
-                process_job.run(job_id)
+            with patch("app.worker.tasks.github_client_context") as client_mock:
+                with patch(
+                    "app.worker.tasks.execute_claimed_job_async",
+                    new_callable=AsyncMock,
+                    return_value=execution_result,
+                ) as execute_mock:
+                    process_job.run(job_id)
 
     session_factory_mock.return_value.close.assert_called_once()
     execute_mock.assert_called_once()
+    client_mock.return_value.__aexit__.assert_called_once()
 
 
 def test_process_job_closes_session_and_propagates_execution_error():
@@ -273,12 +297,39 @@ def test_process_job_closes_session_and_propagates_execution_error():
     with patch("app.worker.tasks.DBSession") as session_factory_mock:
         with patch("app.worker.tasks.claim_job_for_execution") as claim_mock:
             claim_mock.return_value.execution_token = execution_token
-            with patch(
-                "app.worker.tasks.execute_claimed_job",
-                side_effect=RuntimeError("execution failed"),
-            ) as execute_mock:
-                with pytest.raises(RuntimeError, match="execution failed"):
-                    process_job.run(job_id)
+            with patch("app.worker.tasks.github_client_context") as client_mock:
+                with patch(
+                    "app.worker.tasks.execute_claimed_job_async",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("execution failed"),
+                ) as execute_mock:
+                    with pytest.raises(RuntimeError, match="execution failed"):
+                        process_job.run(job_id)
 
     execute_mock.assert_called_once()
     session_factory_mock.return_value.close.assert_called_once()
+    client_mock.return_value.__aexit__.assert_called_once()
+
+
+@pytest.mark.parametrize("token", ["test-token-123", None])
+def test_execute_job_with_github_passes_configured_token(token):
+    with patch("app.worker.tasks.settings") as settings_mock:
+        settings_mock.github_token = token
+        with patch("app.worker.tasks.github_client_context") as client_mock:
+            with patch(
+                "app.worker.tasks.execute_claimed_job_async", new_callable=AsyncMock
+            ) as execute_mock:
+                db = MagicMock()
+                job_id = uuid.uuid4()
+                execution_token = uuid.uuid4()
+
+                asyncio.run(
+                    _execute_job_with_github(
+                        db=db,
+                        job_id=job_id,
+                        execution_token=execution_token,
+                    )
+                )
+
+                client_mock.assert_called_once_with(token=token)
+                execute_mock.assert_awaited_once()
