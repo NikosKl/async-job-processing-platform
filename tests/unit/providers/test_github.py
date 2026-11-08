@@ -28,6 +28,7 @@ def successful_repo_handler(request: httpx.Request) -> httpx.Response:
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "Python",
         },
     )
 
@@ -46,6 +47,7 @@ def zero_metrics_handler(request: httpx.Request) -> httpx.Response:
             "stargazers_count": 0,
             "forks_count": 0,
             "open_issues_count": 0,
+            "language": "Python",
         },
     )
 
@@ -67,6 +69,7 @@ def missing_field_handler(request: httpx.Request) -> httpx.Response:
             "name": "fastapi",
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "Python",
         },
     )
 
@@ -128,6 +131,7 @@ def test_github_client_maps_repository_response():
         assert result.stars == 100
         assert result.forks == 20
         assert result.open_issues == 5
+        assert result.language == "Python"
 
     asyncio.run(run_test())
 
@@ -147,6 +151,7 @@ def test_github_client_preserves_zero_metrics():
         assert result.stars == 0
         assert result.forks == 0
         assert result.open_issues == 0
+        assert result.language == "Python"
 
     asyncio.run(run_test())
 
@@ -216,6 +221,7 @@ def test_github_client_rejects_invalid_metrics(metric, invalid_value):
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "Python",
             metric: invalid_value,
         }
 
@@ -243,6 +249,7 @@ def test_github_client_rejects_invalid_identifiers(field, invalid_value):
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "Python",
         }
 
         return httpx.Response(status_code=200, json=data)
@@ -268,6 +275,7 @@ def test_github_client_rejects_missing_identifiers(missing_field):
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "Python",
         }
 
         if missing_field == "owner":
@@ -387,6 +395,7 @@ def test_github_client_sends_required_headers():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -412,6 +421,7 @@ def test_github_client_sends_bearer_token():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -437,6 +447,7 @@ def test_github_client_does_not_send_authorization_without_token():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -462,6 +473,7 @@ def test_github_client_does_not_send_authorization_with_empty_token():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -486,6 +498,7 @@ def test_github_client_does_not_modify_client_headers():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -515,6 +528,7 @@ def test_github_client_context_uses_supplied_token():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -546,6 +560,7 @@ def test_github_client_context_reuses_http_client():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -578,6 +593,7 @@ def test_github_client_context_closes_http_client_on_exit():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -609,6 +625,7 @@ def test_github_client_context_closes_http_client_on_exception():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -641,6 +658,7 @@ def test_github_client_context_creates_separate_http_clients():
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "language": "python",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -661,5 +679,67 @@ def test_github_client_context_creates_separate_http_clients():
             client_b = github._client
 
         assert client_a is not client_b
+
+    asyncio.run(run_test())
+
+
+def test_github_client_accepts_null_language():
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "language": None,
+        }
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client, token="fake-token-123")
+
+            result = await github_client.get_repository("fastapi", "fastapi")
+
+            assert result.language is None
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "language",
+    [
+        {},
+        {"language": ""},
+        {"language": 123},
+    ],
+)
+def test_github_client_rejects_invalid_language(language):
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+        }
+
+        json.update(language)
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client, token="fake-token-123")
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
 
     asyncio.run(run_test())

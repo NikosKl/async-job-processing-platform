@@ -19,10 +19,12 @@ def test_process_job_completes_queued_job(test_session_factory):
         if http_request.url.path == "/repos/fastapi/fastapi":
             owner, repo = "fastapi", "fastapi"
             stars, forks, open_issues = 100, 20, 5
+            language = "python"
 
         elif http_request.url.path == "/repos/sqlalchemy/sqlalchemy":
             owner, repo = "sqlalchemy", "sqlalchemy"
             stars, forks, open_issues = 250, 50, 10
+            language = "c"
 
         else:
             raise AssertionError(f"Unexpected GitHub request: {http_request.url}")
@@ -35,6 +37,7 @@ def test_process_job_completes_queued_job(test_session_factory):
                 "stargazers_count": stars,
                 "forks_count": forks,
                 "open_issues_count": open_issues,
+                "language": language,
             },
             request=http_request,
         )
@@ -98,21 +101,22 @@ def test_process_job_completes_queued_job(test_session_factory):
         assert len(analysis_items) == 2
 
         expected_metrics = {
-            "fastapi": (100, 20, 5),
-            "sqlalchemy": (250, 50, 10),
+            "fastapi": (100, 20, 5, "python"),
+            "sqlalchemy": (250, 50, 10, "c"),
         }
 
         for item in analysis_items:
             assert item.status == RepositoryStatus.SUCCEEDED
 
-            expected_stars, expected_forks, expected_issues = expected_metrics[
-                item.repository_name
-            ]
+            expected_stars, expected_forks, expected_issues, expected_language = (
+                expected_metrics[item.repository_name]
+            )
 
             assert item.stars == expected_stars
             assert item.forks == expected_forks
             assert item.open_issues == expected_issues
             assert item.completed_at is not None
+            assert item.primary_language == expected_language
 
         assert job.status == JobStatus.COMPLETED
         assert job.attempt_count == 1
@@ -147,10 +151,12 @@ def test_process_job_does_not_reexecute_completed_job(test_session_factory):
         if http_request.url.path == "/repos/fastapi/fastapi":
             owner, repo = "fastapi", "fastapi"
             stars, forks, open_issues = 100, 20, 5
+            language = "python"
 
         elif http_request.url.path == "/repos/sqlalchemy/sqlalchemy":
             owner, repo = "sqlalchemy", "sqlalchemy"
             stars, forks, open_issues = 250, 50, 10
+            language = "c"
 
         else:
             raise AssertionError(f"Unexpected GitHub request: {http_request.url}")
@@ -163,6 +169,7 @@ def test_process_job_does_not_reexecute_completed_job(test_session_factory):
                 "stargazers_count": stars,
                 "forks_count": forks,
                 "open_issues_count": open_issues,
+                "language": language,
             },
             request=http_request,
         )

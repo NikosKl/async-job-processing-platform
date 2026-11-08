@@ -55,6 +55,7 @@ def save_item_result_and_update_progress(
             forks=analysis_result.forks,
             open_issues=analysis_result.open_issues,
             completed_at=completed_at,
+            language=analysis_result.language,
         )
 
         if not result:

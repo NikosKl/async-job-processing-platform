@@ -9,6 +9,7 @@ class RepositoryAnalysisResult:
     stars: int
     forks: int
     open_issues: int
+    language: str | None = None
 
 
 @dataclass(frozen=True)

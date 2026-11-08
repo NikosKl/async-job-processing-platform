@@ -40,6 +40,7 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
         stars=10,
         forks=5,
         open_issues=2,
+        language="Python",
     )
 
     completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
@@ -70,6 +71,7 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
     assert item.forks == analysis_result.forks
     assert item.open_issues == analysis_result.open_issues
     assert item.completed_at == completed_at
+    assert item.primary_language == analysis_result.language
 
 
 def test_save_item_result_and_update_progress_repeated_result(
@@ -154,12 +156,16 @@ def test_save_item_result_and_update_progress_wrong_token(
 
     assert item.status == RepositoryStatus.PENDING
 
+    item.primary_language = "JavaScript"
+    db_session.commit()
+
     analysis_result = RepositoryAnalysisResult(
         owner=item.owner,
         repository=item.repository_name,
         stars=10,
         forks=5,
         open_issues=2,
+        language="Python",
     )
 
     completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
@@ -190,6 +196,7 @@ def test_save_item_result_and_update_progress_wrong_token(
     assert item.forks is None
     assert item.open_issues is None
     assert item.completed_at is None
+    assert item.primary_language == "JavaScript"
 
 
 def test_save_item_result_and_update_progress_rejected_item(

@@ -33,6 +33,7 @@ class GitHubRepositoryResponse(BaseModel):
     stargazers_count: int = Field(strict=True, ge=0)
     forks_count: int = Field(strict=True, ge=0)
     open_issues_count: int = Field(strict=True, ge=0)
+    language: Identifier | None
 
 
 class GitHubClient:
@@ -88,6 +89,7 @@ class GitHubClient:
             stars=validated_data.stargazers_count,
             forks=validated_data.forks_count,
             open_issues=validated_data.open_issues_count,
+            language=validated_data.language,
         )
 
 
