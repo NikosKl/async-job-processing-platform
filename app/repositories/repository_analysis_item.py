@@ -33,6 +33,7 @@ def persist_successful_item_result(
     open_issues: int,
     completed_at: datetime,
     language: str | None = None,
+    archived: bool | None = None,
 ) -> bool:
 
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
@@ -65,6 +66,7 @@ def persist_successful_item_result(
     item.forks = forks
     item.open_issues = open_issues
     item.primary_language = language
+    item.archived = archived
     item.status = RepositoryStatus.SUCCEEDED
     item.completed_at = completed_at
     item.attempt_count += 1

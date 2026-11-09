@@ -14,23 +14,25 @@ from app.providers.github import GitHubClient, github_client_context
 # HANDLERS
 
 
-def successful_repo_handler(request: httpx.Request) -> httpx.Response:
+def successful_repo_handler(
+    request: httpx.Request, archived: bool = False
+) -> httpx.Response:
     assert request.method == "GET"
     assert request.url.scheme == "https"
     assert request.url.host == "api.github.com"
     assert request.url.path == "/repos/fastapi/fastapi"
 
-    return httpx.Response(
-        status_code=200,
-        json={
-            "owner": {"login": "fastapi"},
-            "name": "fastapi",
-            "stargazers_count": 100,
-            "forks_count": 20,
-            "open_issues_count": 5,
-            "language": "Python",
-        },
-    )
+    json = {
+        "owner": {"login": "fastapi"},
+        "name": "fastapi",
+        "stargazers_count": 100,
+        "forks_count": 20,
+        "open_issues_count": 5,
+        "language": "Python",
+        "archived": archived,
+    }
+
+    return httpx.Response(status_code=200, json=json)
 
 
 def zero_metrics_handler(request: httpx.Request) -> httpx.Response:
@@ -48,6 +50,7 @@ def zero_metrics_handler(request: httpx.Request) -> httpx.Response:
             "forks_count": 0,
             "open_issues_count": 0,
             "language": "Python",
+            "archived": True,
         },
     )
 
@@ -70,6 +73,7 @@ def missing_field_handler(request: httpx.Request) -> httpx.Response:
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "Python",
+            "archived": True,
         },
     )
 
@@ -96,6 +100,7 @@ def extra_fields_handler(request: httpx.Request) -> httpx.Response:
             "open_issues_count": 5,
             "description": "A Python web framework",
             "language": "Python",
+            "archived": True,
             "html_url": "https://github.com/fastapi/fastapi",
         },
     )
@@ -116,8 +121,17 @@ def test_github_client_sends_correct_request():
     asyncio.run(run_test())
 
 
-def test_github_client_maps_repository_response():
-    transport = httpx.MockTransport(successful_repo_handler)
+@pytest.mark.parametrize(
+    "archived",
+    [
+        pytest.param(True, id="archived"),
+        pytest.param(False, id="not-archived"),
+    ],
+)
+def test_github_client_maps_repository_response(archived):
+    transport = httpx.MockTransport(
+        lambda request: successful_repo_handler(request, archived=archived)
+    )
 
     async def run_test():
         async with httpx.AsyncClient(transport=transport) as client:
@@ -132,6 +146,7 @@ def test_github_client_maps_repository_response():
         assert result.forks == 20
         assert result.open_issues == 5
         assert result.language == "Python"
+        assert result.archived is archived
 
     asyncio.run(run_test())
 
@@ -222,6 +237,7 @@ def test_github_client_rejects_invalid_metrics(metric, invalid_value):
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "Python",
+            "archived": True,
             metric: invalid_value,
         }
 
@@ -250,6 +266,7 @@ def test_github_client_rejects_invalid_identifiers(field, invalid_value):
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "Python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=data)
@@ -276,6 +293,7 @@ def test_github_client_rejects_missing_identifiers(missing_field):
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "Python",
+            "archived": True,
         }
 
         if missing_field == "owner":
@@ -396,6 +414,7 @@ def test_github_client_sends_required_headers():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -422,6 +441,7 @@ def test_github_client_sends_bearer_token():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -448,6 +468,7 @@ def test_github_client_does_not_send_authorization_without_token():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -474,6 +495,7 @@ def test_github_client_does_not_send_authorization_with_empty_token():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -499,6 +521,7 @@ def test_github_client_does_not_modify_client_headers():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -529,6 +552,7 @@ def test_github_client_context_uses_supplied_token():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -561,6 +585,7 @@ def test_github_client_context_reuses_http_client():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -594,6 +619,7 @@ def test_github_client_context_closes_http_client_on_exit():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -626,6 +652,7 @@ def test_github_client_context_closes_http_client_on_exception():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -659,6 +686,7 @@ def test_github_client_context_creates_separate_http_clients():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -693,6 +721,7 @@ def test_github_client_accepts_null_language():
             "forks_count": 20,
             "open_issues_count": 5,
             "language": None,
+            "archived": True,
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -727,9 +756,47 @@ def test_github_client_rejects_invalid_language(language):
             "stargazers_count": 100,
             "forks_count": 20,
             "open_issues_count": 5,
+            "archived": True,
         }
 
         json.update(language)
+
+        return httpx.Response(status_code=200, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client, token="fake-token-123")
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "archived_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"archived": None}, id="null"),
+        pytest.param({"archived": 0}, id="zero"),
+        pytest.param({"archived": 1}, id="one"),
+        pytest.param({"archived": "false"}, id="string"),
+    ],
+)
+def test_github_client_rejects_invalid_archived(archived_fields):
+    def handler(request: httpx.Request) -> httpx.Response:
+        json: dict[str, object] = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "language": "python",
+        }
+
+        json.update(archived_fields)
 
         return httpx.Response(status_code=200, json=json, request=request)
 

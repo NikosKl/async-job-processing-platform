@@ -10,6 +10,7 @@ class RepositoryAnalysisResult:
     forks: int
     open_issues: int
     language: str | None = None
+    archived: bool | None = None
 
 
 @dataclass(frozen=True)

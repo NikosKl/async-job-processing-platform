@@ -34,6 +34,7 @@ class GitHubRepositoryResponse(BaseModel):
     forks_count: int = Field(strict=True, ge=0)
     open_issues_count: int = Field(strict=True, ge=0)
     language: Identifier | None
+    archived: bool = Field(strict=True)
 
 
 class GitHubClient:
@@ -90,6 +91,7 @@ class GitHubClient:
             forks=validated_data.forks_count,
             open_issues=validated_data.open_issues_count,
             language=validated_data.language,
+            archived=validated_data.archived,
         )
 
 

@@ -146,6 +146,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
         open_issues=5,
         completed_at=completed_at,
         language="Python",
+        archived=True,
     )
 
     assert result is True
@@ -158,6 +159,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
     assert item.error_type is None
     assert item.error_message is None
     assert item.primary_language == "Python"
+    assert item.archived is True
 
 
 def test_persist_successful_item_result_wrong_execution_token_leaves_item_unchanged(
