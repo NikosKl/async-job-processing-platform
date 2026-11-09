@@ -266,8 +266,8 @@ def test_process_job_successful_claim_calls_execution_service():
 @pytest.mark.parametrize(
     "execution_result",
     [
-        True,
-        False,
+        pytest.param(True, id="successful"),
+        pytest.param(False, id="failed"),
     ],
 )
 def test_process_job_closes_session_after_execution(execution_result):
@@ -311,7 +311,13 @@ def test_process_job_closes_session_and_propagates_execution_error():
     client_mock.return_value.__aexit__.assert_called_once()
 
 
-@pytest.mark.parametrize("token", ["test-token-123", None])
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param("test-token-123", id="token"),
+        pytest.param(None, id="none"),
+    ],
+)
 def test_execute_job_with_github_passes_configured_token(token):
     with patch("app.worker.tasks.settings") as settings_mock:
         settings_mock.github_token = token

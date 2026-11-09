@@ -421,9 +421,9 @@ def test_claim_job_returns_none_for_future_retry(
 @pytest.mark.parametrize(
     "status",
     [
-        JobStatus.RUNNING,
-        JobStatus.COMPLETED,
-        JobStatus.FAILED,
+        pytest.param(JobStatus.RUNNING, id="running"),
+        pytest.param(JobStatus.COMPLETED, id="completed"),
+        pytest.param(JobStatus.FAILED, id="failed"),
     ],
 )
 def test_claim_job_returns_none_for_ineligible_status(
@@ -624,8 +624,8 @@ def test_claim_job_rejects_naive_lease_expiry(db_session):
 @pytest.mark.parametrize(
     "lease_offset",
     [
-        timedelta(minutes=-10),
-        timedelta(0),
+        pytest.param(timedelta(minutes=10), id="10-minutes"),
+        pytest.param(timedelta(0), id="zero-offset"),
     ],
 )
 def test_claim_job_rejects_lease_expiry_not_later_than_claim_time(

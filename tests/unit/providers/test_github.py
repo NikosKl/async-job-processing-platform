@@ -188,7 +188,12 @@ def test_github_client_raises_on_404_response():
 
 
 @pytest.mark.parametrize(
-    "error_type", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError]
+    "error_type",
+    [
+        pytest.param(httpx.ReadTimeout, id="read-timeout"),
+        pytest.param(httpx.ConnectTimeout, id="connect-timeout"),
+        pytest.param(httpx.ConnectError, id="connect-error"),
+    ],
 )
 def test_github_client_translates_transport_errors(error_type):
 
@@ -224,9 +229,22 @@ def test_github_client_raises_on_missing_required_field():
 
 @pytest.mark.parametrize(
     "metric",
-    ["stargazers_count", "forks_count", "open_issues_count"],
+    [
+        pytest.param("stargazers_count", id="stargazers_count"),
+        pytest.param("forks_count", id="forks_count"),
+        pytest.param("open_issues_count", id="open_issues_count"),
+    ],
 )
-@pytest.mark.parametrize("invalid_value", [None, "100", True, 1.5, -1])
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        pytest.param(None, id="none"),
+        pytest.param("100", id="100"),
+        pytest.param(True, id="true"),
+        pytest.param(1.5, id="1.5"),
+        pytest.param(-1, id="-1"),
+    ],
+)
 def test_github_client_rejects_invalid_metrics(metric, invalid_value):
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -255,8 +273,23 @@ def test_github_client_rejects_invalid_metrics(metric, invalid_value):
     asyncio.run(run_test())
 
 
-@pytest.mark.parametrize("field", ["login", "name"])
-@pytest.mark.parametrize("invalid_value", [None, "", "   ", 123, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param("login", id="login"),
+        pytest.param("name", id="name"),
+    ],
+)
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        pytest.param(None, id="none"),
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="gap"),
+        pytest.param(123, id="123"),
+        pytest.param(True, id="true"),
+    ],
+)
 def test_github_client_rejects_invalid_identifiers(field, invalid_value):
     def handler(request: httpx.Request) -> httpx.Response:
         data = {
@@ -283,7 +316,14 @@ def test_github_client_rejects_invalid_identifiers(field, invalid_value):
     asyncio.run(run_test())
 
 
-@pytest.mark.parametrize("missing_field", ["owner", "login", "name"])
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        pytest.param("owner", id="owner"),
+        pytest.param("login", id="login"),
+        pytest.param("name", id="name"),
+    ],
+)
 def test_github_client_rejects_missing_identifiers(missing_field):
     def handler(request: httpx.Request) -> httpx.Response:
         data = {
@@ -362,7 +402,14 @@ def test_github_client_ignores_extra_fields():
     asyncio.run(run_test())
 
 
-@pytest.mark.parametrize("status_code", [500, 502, 503])
+@pytest.mark.parametrize(
+    "status_code",
+    [
+        pytest.param(500, id="500"),
+        pytest.param(502, id="502"),
+        pytest.param(503, id="503"),
+    ],
+)
 def test_github_client_raises_on_server_error(status_code):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code=status_code, request=request)
@@ -382,7 +429,13 @@ def test_github_client_raises_on_server_error(status_code):
     asyncio.run(run_test())
 
 
-@pytest.mark.parametrize("status_code", [401, 403])
+@pytest.mark.parametrize(
+    "status_code",
+    [
+        pytest.param(401, id="403"),
+        pytest.param(403, id="403"),
+    ],
+)
 def test_github_client_preserves_other_http_errors(status_code):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code=status_code, request=request)
@@ -742,9 +795,9 @@ def test_github_client_accepts_null_language():
 @pytest.mark.parametrize(
     "language",
     [
-        {},
-        {"language": ""},
-        {"language": 123},
+        pytest.param({}, id="missing"),
+        pytest.param({"language": ""}, id="empty-string"),
+        pytest.param({"language": 123}, id="invalid-type"),
     ],
 )
 def test_github_client_rejects_invalid_language(language):
