@@ -147,6 +147,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
         completed_at=completed_at,
         language="Python",
         archived=True,
+        last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
     )
 
     assert result is True
@@ -160,6 +161,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
     assert item.error_message is None
     assert item.primary_language == "Python"
     assert item.archived is True
+    assert item.last_push_at == datetime(2026, 9, 30, 14, 30, tzinfo=UTC)
 
 
 def test_persist_successful_item_result_wrong_execution_token_leaves_item_unchanged(

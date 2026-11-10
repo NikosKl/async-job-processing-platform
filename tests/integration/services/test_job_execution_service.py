@@ -42,6 +42,7 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
         open_issues=2,
         language="Python",
         archived=True,
+        last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
     )
 
     completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
@@ -74,6 +75,7 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
     assert item.completed_at == completed_at
     assert item.primary_language == analysis_result.language
     assert item.archived == analysis_result.archived
+    assert item.last_push_at == analysis_result.last_push_at
 
 
 def test_save_item_result_and_update_progress_repeated_result(
@@ -160,6 +162,7 @@ def test_save_item_result_and_update_progress_wrong_token(
 
     item.primary_language = "JavaScript"
     item.archived = True
+    item.last_push_at = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
     db_session.commit()
 
     analysis_result = RepositoryAnalysisResult(
@@ -170,6 +173,7 @@ def test_save_item_result_and_update_progress_wrong_token(
         open_issues=2,
         language="Python",
         archived=False,
+        last_push_at=datetime(2026, 11, 10, 12, 0, tzinfo=UTC),
     )
 
     completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
@@ -202,6 +206,7 @@ def test_save_item_result_and_update_progress_wrong_token(
     assert item.completed_at is None
     assert item.primary_language == "JavaScript"
     assert item.archived is True
+    assert item.last_push_at == datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
 
 
 def test_save_item_result_and_update_progress_rejected_item(

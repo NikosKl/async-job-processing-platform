@@ -57,6 +57,7 @@ def save_item_result_and_update_progress(
             completed_at=completed_at,
             language=analysis_result.language,
             archived=analysis_result.archived,
+            last_push_at=analysis_result.last_push_at,
         )
 
         if not result:

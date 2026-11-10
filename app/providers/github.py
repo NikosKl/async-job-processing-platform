@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated
 
 import httpx
@@ -35,6 +36,7 @@ class GitHubRepositoryResponse(BaseModel):
     open_issues_count: int = Field(strict=True, ge=0)
     language: Identifier | None
     archived: bool = Field(strict=True)
+    pushed_at: str | None = Field(strict=True)
 
 
 class GitHubClient:
@@ -84,6 +86,22 @@ class GitHubClient:
                 "Invalid GitHub repository response"
             ) from exc
 
+        last_pushed_at = None
+
+        if validated_data.pushed_at is not None:
+            try:
+                pushed_at = datetime.fromisoformat(validated_data.pushed_at)
+            except ValueError as exc:
+                raise InvalidRepositoryResponseError(
+                    "Invalid GitHub repository timestamp"
+                ) from exc
+            if pushed_at.tzinfo is None or pushed_at.utcoffset() is None:
+                raise InvalidRepositoryResponseError(
+                    "GitHub repository timestamp must have a timezone"
+                )
+
+            last_pushed_at = pushed_at.astimezone(UTC)
+
         return RepositoryAnalysisResult(
             owner=validated_data.owner.login,
             repository=validated_data.name,
@@ -92,6 +110,7 @@ class GitHubClient:
             open_issues=validated_data.open_issues_count,
             language=validated_data.language,
             archived=validated_data.archived,
+            last_push_at=last_pushed_at,
         )
 
 

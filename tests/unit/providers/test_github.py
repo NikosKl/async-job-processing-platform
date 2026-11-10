@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -30,6 +31,7 @@ def successful_repo_handler(
         "open_issues_count": 5,
         "language": "Python",
         "archived": archived,
+        "pushed_at": "2026-11-05T14:30:00Z",
     }
 
     return httpx.Response(status_code=200, json=json)
@@ -51,6 +53,7 @@ def zero_metrics_handler(request: httpx.Request) -> httpx.Response:
             "open_issues_count": 0,
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         },
     )
 
@@ -74,6 +77,7 @@ def missing_field_handler(request: httpx.Request) -> httpx.Response:
             "open_issues_count": 5,
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         },
     )
 
@@ -101,6 +105,7 @@ def extra_fields_handler(request: httpx.Request) -> httpx.Response:
             "description": "A Python web framework",
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
             "html_url": "https://github.com/fastapi/fastapi",
         },
     )
@@ -147,6 +152,7 @@ def test_github_client_maps_repository_response(archived):
         assert result.open_issues == 5
         assert result.language == "Python"
         assert result.archived is archived
+        assert result.last_push_at == datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
 
     asyncio.run(run_test())
 
@@ -256,6 +262,7 @@ def test_github_client_rejects_invalid_metrics(metric, invalid_value):
             "open_issues_count": 5,
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
             metric: invalid_value,
         }
 
@@ -300,6 +307,7 @@ def test_github_client_rejects_invalid_identifiers(field, invalid_value):
             "open_issues_count": 5,
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=data)
@@ -334,6 +342,7 @@ def test_github_client_rejects_missing_identifiers(missing_field):
             "open_issues_count": 5,
             "language": "Python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         if missing_field == "owner":
@@ -468,6 +477,7 @@ def test_github_client_sends_required_headers():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -495,6 +505,7 @@ def test_github_client_sends_bearer_token():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -522,6 +533,7 @@ def test_github_client_does_not_send_authorization_without_token():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -549,6 +561,7 @@ def test_github_client_does_not_send_authorization_with_empty_token():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -575,6 +588,7 @@ def test_github_client_does_not_modify_client_headers():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -606,6 +620,7 @@ def test_github_client_context_uses_supplied_token():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -639,6 +654,7 @@ def test_github_client_context_reuses_http_client():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -673,6 +689,7 @@ def test_github_client_context_closes_http_client_on_exit():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -706,6 +723,7 @@ def test_github_client_context_closes_http_client_on_exception():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -740,6 +758,7 @@ def test_github_client_context_creates_separate_http_clients():
             "open_issues_count": 5,
             "language": "python",
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -775,6 +794,7 @@ def test_github_client_accepts_null_language():
             "open_issues_count": 5,
             "language": None,
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         return httpx.Response(status_code=200, json=json, request=request)
@@ -810,6 +830,7 @@ def test_github_client_rejects_invalid_language(language):
             "forks_count": 20,
             "open_issues_count": 5,
             "archived": True,
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         json.update(language)
@@ -847,6 +868,7 @@ def test_github_client_rejects_invalid_archived(archived_fields):
             "forks_count": 20,
             "open_issues_count": 5,
             "language": "python",
+            "pushed_at": "2026-11-05T14:30:00Z",
         }
 
         json.update(archived_fields)
@@ -858,6 +880,103 @@ def test_github_client_rejects_invalid_archived(archived_fields):
     async def run_test():
         async with httpx.AsyncClient(transport=transport) as client:
             github_client = GitHubClient(client, token="fake-token-123")
+
+            with pytest.raises(InvalidRepositoryResponseError):
+                await github_client.get_repository("fastapi", "fastapi")
+
+    asyncio.run(run_test())
+
+
+def test_github_client_normalizes_push_timestamp_to_utc():
+    def handler(request: httpx.Request) -> httpx.Response:
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "language": "Python",
+            "archived": True,
+            "pushed_at": "2026-11-05T16:30:00+02:00",
+        }
+
+        return httpx.Response(status_code=200, json=json)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            result = await github_client.get_repository("fastapi", "fastapi")
+
+            assert result.last_push_at is not None
+            assert result.last_push_at.tzinfo is UTC
+            assert result.last_push_at == datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
+
+    asyncio.run(run_test())
+
+
+def test_github_client_accepts_null_pushed_at():
+    def handler(request: httpx.Request) -> httpx.Response:
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "language": "Python",
+            "archived": True,
+            "pushed_at": None,
+        }
+
+        return httpx.Response(status_code=200, json=json)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            result = await github_client.get_repository("fastapi", "fastapi")
+
+            assert result.last_push_at is None
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "pushed_at",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"pushed_at": "invalid date"}, id="malformed"),
+        pytest.param({"pushed_at": "2026-11-05T14:30:00"}, id="naive"),
+        pytest.param({"pushed_at": 123}, id="numeric"),
+        pytest.param({"pushed_at": True}, id="true"),
+        pytest.param({"pushed_at": False}, id="false"),
+    ],
+)
+def test_github_client_rejects_invalid_pushed_at(pushed_at):
+    def handler(request: httpx.Request) -> httpx.Response:
+        json = {
+            "owner": {"login": "fastapi"},
+            "name": "fastapi",
+            "stargazers_count": 100,
+            "forks_count": 20,
+            "open_issues_count": 5,
+            "language": "Python",
+            "archived": True,
+        }
+
+        json.update(pushed_at)
+
+        return httpx.Response(status_code=200, json=json)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
 
             with pytest.raises(InvalidRepositoryResponseError):
                 await github_client.get_repository("fastapi", "fastapi")

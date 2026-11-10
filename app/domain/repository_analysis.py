@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 
@@ -11,6 +12,7 @@ class RepositoryAnalysisResult:
     open_issues: int
     language: str | None = None
     archived: bool | None = None
+    last_push_at: datetime | None = None
 
 
 @dataclass(frozen=True)

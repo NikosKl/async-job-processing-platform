@@ -624,7 +624,7 @@ def test_claim_job_rejects_naive_lease_expiry(db_session):
 @pytest.mark.parametrize(
     "lease_offset",
     [
-        pytest.param(timedelta(minutes=10), id="10-minutes"),
+        pytest.param(timedelta(minutes=-10), id="10-minutes"),
         pytest.param(timedelta(0), id="zero-offset"),
     ],
 )
