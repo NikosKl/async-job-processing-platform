@@ -10,6 +10,7 @@ from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
 from app.domain.repository_analysis import (
     RepositoryAnalysisItemInput,
     RepositoryAnalysisResult,
+    classify_repository_activity,
 )
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.repositories.job import increment_job_progress
@@ -46,6 +47,11 @@ def save_item_result_and_update_progress(
         raise ValueError("completed_at must be timezone-aware")
 
     try:
+        activity_classification = classify_repository_activity(
+            last_push_at=analysis_result.last_push_at,
+            reference_time=completed_at,
+        )
+
         result = persist_successful_item_result(
             db=db,
             job_id=job_id,
@@ -58,6 +64,7 @@ def save_item_result_and_update_progress(
             language=analysis_result.language,
             archived=analysis_result.archived,
             last_push_at=analysis_result.last_push_at,
+            activity_classification=activity_classification,
         )
 
         if not result:

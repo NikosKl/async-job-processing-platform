@@ -35,6 +35,7 @@ def persist_successful_item_result(
     language: str | None = None,
     archived: bool | None = None,
     last_push_at: datetime | None = None,
+    activity_classification: str | None = None,
 ) -> bool:
 
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
@@ -69,6 +70,7 @@ def persist_successful_item_result(
     item.primary_language = language
     item.archived = archived
     item.last_push_at = last_push_at
+    item.activity_classification = activity_classification
     item.status = RepositoryStatus.SUCCEEDED
     item.completed_at = completed_at
     item.attempt_count += 1

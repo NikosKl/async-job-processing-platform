@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -19,7 +19,18 @@ from app.services.job_execution_service import (
 )
 
 
-def test_save_item_result_updates_progress_success(db_session, claimed_job_factory):
+@pytest.mark.parametrize(
+    ("age", "expected_classification"),
+    [
+        pytest.param(timedelta(days=5), "HIGH", id="high"),
+        pytest.param(timedelta(days=31), "MEDIUM", id="medium"),
+        pytest.param(timedelta(days=181), "LOW", id="low"),
+        pytest.param(None, None, id="unknown"),
+    ],
+)
+def test_save_item_result_updates_progress_success(
+    db_session, claimed_job_factory, age, expected_classification
+):
     claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
     _, _, claimed_job, items = claimed_job_factory(
@@ -34,6 +45,9 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
 
     assert item.status == RepositoryStatus.PENDING
 
+    completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    last_push_at = completed_at - age if age is not None else None
+
     analysis_result = RepositoryAnalysisResult(
         owner=item.owner,
         repository=item.repository_name,
@@ -42,10 +56,8 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
         open_issues=2,
         language="Python",
         archived=True,
-        last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
+        last_push_at=last_push_at,
     )
-
-    completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
     result = save_item_result_and_update_progress(
         db=db_session,
@@ -76,6 +88,7 @@ def test_save_item_result_updates_progress_success(db_session, claimed_job_facto
     assert item.primary_language == analysis_result.language
     assert item.archived == analysis_result.archived
     assert item.last_push_at == analysis_result.last_push_at
+    assert item.activity_classification == expected_classification
 
 
 def test_save_item_result_and_update_progress_repeated_result(
@@ -163,6 +176,7 @@ def test_save_item_result_and_update_progress_wrong_token(
     item.primary_language = "JavaScript"
     item.archived = True
     item.last_push_at = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+    item.activity_classification = "LOW"
     db_session.commit()
 
     analysis_result = RepositoryAnalysisResult(
@@ -176,7 +190,7 @@ def test_save_item_result_and_update_progress_wrong_token(
         last_push_at=datetime(2026, 11, 10, 12, 0, tzinfo=UTC),
     )
 
-    completed_at = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    completed_at = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
     wrong_token = uuid.uuid4()
 
     result = save_item_result_and_update_progress(
@@ -207,6 +221,7 @@ def test_save_item_result_and_update_progress_wrong_token(
     assert item.primary_language == "JavaScript"
     assert item.archived is True
     assert item.last_push_at == datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+    assert item.activity_classification == "LOW"
 
 
 def test_save_item_result_and_update_progress_rejected_item(
@@ -280,12 +295,16 @@ def test_save_item_result_and_update_progress_rolls_back_on_progress_failure(
     job_id = claimed_job.id
     item_id = item.id
 
+    item.activity_classification = "LOW"
+    db_session.commit()
+
     analysis_result = RepositoryAnalysisResult(
         owner=item.owner,
         repository=item.repository_name,
         stars=10,
         forks=5,
         open_issues=2,
+        last_push_at=datetime(2026, 10, 1, 12, 0, tzinfo=UTC),
     )
 
     completed_at = datetime(2026, 10, 2, 12, 5, tzinfo=UTC)
@@ -319,6 +338,7 @@ def test_save_item_result_and_update_progress_rolls_back_on_progress_failure(
     assert item.forks is None
     assert item.open_issues is None
     assert item.completed_at is None
+    assert item.activity_classification == "LOW"
 
 
 def test_save_item_result_and_update_progress_rolls_back_on_commit_failure(
