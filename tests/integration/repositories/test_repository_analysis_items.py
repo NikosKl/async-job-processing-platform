@@ -145,6 +145,10 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
         forks=20,
         open_issues=5,
         completed_at=completed_at,
+        language="Python",
+        archived=True,
+        last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
+        activity_classification="HIGH",
     )
 
     assert result is True
@@ -156,6 +160,10 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
     assert item.completed_at == completed_at
     assert item.error_type is None
     assert item.error_message is None
+    assert item.primary_language == "Python"
+    assert item.archived is True
+    assert item.last_push_at == datetime(2026, 9, 30, 14, 30, tzinfo=UTC)
+    assert item.activity_classification == "HIGH"
 
 
 def test_persist_successful_item_result_wrong_execution_token_leaves_item_unchanged(

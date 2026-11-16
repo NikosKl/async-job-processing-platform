@@ -16,3 +16,15 @@ class InvalidCredentialsError(Exception):
 
 class InvalidAccessTokenError(Exception):
     pass
+
+
+class InvalidRepositoryResponseError(Exception):
+    pass
+
+
+class RepositoryUnavailableError(Exception):
+    pass
+
+
+class GitHubUnavailableError(Exception):
+    pass

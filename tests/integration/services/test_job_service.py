@@ -1055,17 +1055,20 @@ def test_claim_job_for_execution_allows_only_one_concurrent_winner(
 @pytest.mark.parametrize(
     ("claim_time", "lease_duration"),
     [
-        (
+        pytest.param(
             datetime(2026, 10, 2, 12, 0),
             timedelta(minutes=10),
+            id="naive-claim-time",
         ),
-        (
+        pytest.param(
             datetime(2026, 10, 2, 12, 0, tzinfo=UTC),
             timedelta(minutes=0),
+            id="zero-lease-duration",
         ),
-        (
+        pytest.param(
             datetime(2026, 10, 2, 12, 0, tzinfo=UTC),
             timedelta(minutes=-5),
+            id="negative-lease-duration",
         ),
     ],
 )
