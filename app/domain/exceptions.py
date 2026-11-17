@@ -28,3 +28,10 @@ class RepositoryUnavailableError(Exception):
 
 class GitHubUnavailableError(Exception):
     pass
+
+
+class RepositoryAnalysisFailedError(Exception):
+    def __init__(self, attempt_count: int) -> None:
+        super().__init__(f"Repository analysis failed with {attempt_count} attempts")
+
+        self.attempt_count = attempt_count
