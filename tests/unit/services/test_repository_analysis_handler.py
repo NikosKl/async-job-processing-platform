@@ -1,14 +1,23 @@
 import asyncio
 from contextlib import aclosing
+from unittest.mock import AsyncMock, call
 from uuid import uuid4
 
 import pytest
 
+from app.domain.exceptions import (
+    GitHubUnavailableError,
+    RepositoryAnalysisFailedError,
+    RepositoryUnavailableError,
+)
 from app.domain.repository_analysis import (
     RepositoryAnalysisItemInput,
     RepositoryAnalysisResult,
 )
-from app.services.repository_analysis_handler import analyze_repositories
+from app.services.repository_analysis_handler import (
+    analyze_repositories,
+    analyze_repository_with_retries,
+)
 
 
 def test_analyze_repositories_calls_provider_with_correct_identifiers():
@@ -334,3 +343,313 @@ def test_analyze_repositories_cleans_up_on_early_close():
         assert blocked_cancelled.is_set()
 
     asyncio.run(asyncio.wait_for(run_test(), timeout=10))
+
+
+def test_analyze_repository_with_retries_immediate_success():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi", repository="fastapi", stars=100, forks=20, open_issues=5
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            return expected_result
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=fake_provider,
+            repository=item,
+            semaphore=asyncio.Semaphore(1),
+            sleep=sleep_mock,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 1
+        assert fake_provider.calls == [(item.owner, item.repository)]
+        sleep_mock.assert_not_awaited()
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_succeeds_on_second_attempt():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi", repository="fastapi", stars=100, forks=20, open_issues=5
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            if len(self.calls) == 1:
+                raise GitHubUnavailableError("GitHub is temporarily unavailable")
+            return expected_result
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=fake_provider,
+            repository=item,
+            semaphore=asyncio.Semaphore(1),
+            sleep=sleep_mock,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 2
+        assert len(fake_provider.calls) == 2
+        sleep_mock.assert_awaited_once_with(1)
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_succeeds_on_third_attempt():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi", repository="fastapi", stars=100, forks=20, open_issues=5
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            if len(self.calls) == 1 or len(self.calls) == 2:
+                raise GitHubUnavailableError("GitHub is temporarily unavailable")
+            return expected_result
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=fake_provider,
+            repository=item,
+            semaphore=asyncio.Semaphore(1),
+            sleep=sleep_mock,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 3
+        assert len(fake_provider.calls) == 3
+        assert sleep_mock.await_args_list == [call(1), call(2)]
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_exhausts_three_attempts():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            raise GitHubUnavailableError("GitHub is temporarily unavailable")
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        with pytest.raises(RepositoryAnalysisFailedError) as exc_info:
+            _, attempt_count = await analyze_repository_with_retries(
+                provider=fake_provider,
+                repository=item,
+                semaphore=asyncio.Semaphore(1),
+                sleep=sleep_mock,
+            )
+
+        assert len(fake_provider.calls) == 3
+        assert sleep_mock.await_args_list == [call(1), call(2)]
+        assert exc_info.value.attempt_count == 3
+        assert isinstance(exc_info.value.__cause__, GitHubUnavailableError)
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_stops_on_permanent_error():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            raise RepositoryUnavailableError("Repository not found")
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        with pytest.raises(RepositoryAnalysisFailedError) as exc_info:
+            await analyze_repository_with_retries(
+                provider=fake_provider,
+                repository=item,
+                semaphore=asyncio.Semaphore(1),
+                sleep=sleep_mock,
+            )
+
+        assert exc_info.value.attempt_count == 1
+        assert isinstance(exc_info.value.__cause__, RepositoryUnavailableError)
+        assert len(fake_provider.calls) == 1
+        sleep_mock.assert_not_awaited()
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_propagates_unclassified_error():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            raise RuntimeError("Unexpected provider error")
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        with pytest.raises(RuntimeError, match="Unexpected provider error"):
+            await analyze_repository_with_retries(
+                provider=fake_provider,
+                repository=item,
+                semaphore=asyncio.Semaphore(1),
+                sleep=sleep_mock,
+            )
+
+        assert len(fake_provider.calls) == 1
+        sleep_mock.assert_not_awaited()
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_propagates_cancellation():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+            raise asyncio.CancelledError()
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        with pytest.raises(asyncio.CancelledError):
+            await analyze_repository_with_retries(
+                provider=fake_provider,
+                repository=item,
+                semaphore=asyncio.Semaphore(1),
+                sleep=sleep_mock,
+            )
+
+        assert len(fake_provider.calls) == 1
+        sleep_mock.assert_not_awaited()
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_releases_semaphore_during_backoff():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi",
+        repository="fastapi",
+        stars=100,
+        forks=20,
+        open_issues=5,
+    )
+
+    semaphore = asyncio.Semaphore(1)
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+
+            if len(self.calls) == 1:
+                raise GitHubUnavailableError("GitHub temporarily unavailable")
+
+            return expected_result
+
+    fake_provider = FakeProvider()
+    sleep_calls = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+        async with asyncio.timeout(1):
+            async with semaphore:
+                pass
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=fake_provider,
+            repository=item,
+            semaphore=semaphore,
+            sleep=fake_sleep,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 2
+
+    asyncio.run(run_test())
+
+    assert len(fake_provider.calls) == 2
+    assert sleep_calls == [1]
