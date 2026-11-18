@@ -22,6 +22,19 @@ class RepositoryAnalysisItemInput:
     repository: str
 
 
+@dataclass
+class RepositoryAnalysisSuccess:
+    attempt_count: int
+    result: RepositoryAnalysisResult
+
+
+@dataclass
+class RepositoryAnalysisFailure:
+    error_type: str
+    error_message: str
+    attempt_count: int
+
+
 def classify_repository_activity(
     last_push_at: datetime | None, reference_time: datetime
 ) -> str | None:

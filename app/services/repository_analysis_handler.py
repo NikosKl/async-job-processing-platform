@@ -6,8 +6,10 @@ from uuid import UUID
 
 from app.domain.exceptions import RepositoryAnalysisFailedError
 from app.domain.repository_analysis import (
+    RepositoryAnalysisFailure,
     RepositoryAnalysisItemInput,
     RepositoryAnalysisResult,
+    RepositoryAnalysisSuccess,
 )
 from app.domain.repository_errors import classify_repository_error
 
@@ -82,3 +84,51 @@ async def analyze_repository_with_retries(
                     raise RepositoryAnalysisFailedError(attempt_count) from error
                 await sleep(attempt_count)
     raise RuntimeError("Retry loop ended without a result or failure")
+
+
+async def analyze_repositories_with_retries(
+    provider: RepositoryProvider,
+    items: list[RepositoryAnalysisItemInput],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> AsyncGenerator[tuple[UUID, RepositoryAnalysisSuccess | RepositoryAnalysisFailure]]:
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def analyze_item(repository_item: RepositoryAnalysisItemInput):
+
+        try:
+            result, attempt_count = await analyze_repository_with_retries(
+                provider, repository_item, semaphore, sleep
+            )
+
+            outcome_success = RepositoryAnalysisSuccess(
+                attempt_count=attempt_count, result=result
+            )
+
+            return repository_item.item_id, outcome_success
+
+        except RepositoryAnalysisFailedError as err:
+            original_error = err.__cause__
+
+            error = RepositoryAnalysisFailure(
+                error_type=type(original_error).__name__,
+                error_message=str(original_error),
+                attempt_count=err.attempt_count,
+            )
+
+            return repository_item.item_id, error
+
+    tasks = []
+
+    try:
+        for item in items:
+            tasks.append(asyncio.create_task(analyze_item(item)))
+
+        for task in asyncio.as_completed(tasks):
+            item_id, outcome = await task
+            yield item_id, outcome
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
