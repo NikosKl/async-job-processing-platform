@@ -80,3 +80,55 @@ def persist_successful_item_result(
     db.flush()
 
     return True
+
+
+def persist_failed_item_result(
+    db: Session,
+    job_id: uuid.UUID,
+    item_id: uuid.UUID,
+    execution_token: uuid.UUID,
+    error_type: str,
+    error_message: str,
+    attempt_count: int,
+    completed_at: datetime,
+) -> bool:
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+        raise ValueError("completed_at must be timezone-aware")
+
+    if not 1 <= attempt_count <= 3:
+        raise ValueError("attempt_count must be between 1 and 3")
+
+    stmt = (
+        select(Job)
+        .where(Job.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+    job = db.scalar(stmt)
+
+    if job is None:
+        return False
+    if job.status != JobStatus.RUNNING or job.execution_token != execution_token:
+        return False
+
+    stmt = select(RepositoryAnalysisItem).where(
+        RepositoryAnalysisItem.id == item_id,
+        RepositoryAnalysisItem.job_id == job_id,
+        RepositoryAnalysisItem.status == RepositoryStatus.PENDING,
+    )
+
+    item = db.scalar(stmt)
+
+    if item is None:
+        return False
+
+    item.status = RepositoryStatus.FAILED
+    item.error_type = error_type[:255]
+    item.error_message = error_message[:255]
+    item.attempt_count = attempt_count
+    item.completed_at = completed_at
+
+    db.flush()
+
+    return True

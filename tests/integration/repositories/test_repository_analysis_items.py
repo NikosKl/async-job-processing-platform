@@ -8,6 +8,7 @@ from app.domain.enums import JobStatus, RepositoryStatus
 from app.models import Job, RepositoryAnalysisItem
 from app.repositories.repository_analysis_item import (
     list_repository_analysis_items_by_job_id,
+    persist_failed_item_result,
     persist_successful_item_result,
 )
 from app.repositories.user import create_user
@@ -773,3 +774,797 @@ def test_persist_successful_item_result_rejects_stale_execution_token(
         assert item.forks is None
         assert item.open_issues is None
         assert item.completed_at is None
+
+
+def test_persist_failed_item_result_saves_failure_details(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is True
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == "GitHubUnavailableError"
+    assert item.error_message == "GitHub is temporarily unavailable"
+    assert item.attempt_count == 3
+    assert item.completed_at == completed_at
+
+
+def test_persist_failed_item_result_rejects_stale_execution_token(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+    assert claimed_job.status == JobStatus.RUNNING
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+
+    completed_at = datetime.now(UTC)
+
+    wrong_token = uuid.uuid4()
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=wrong_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item.attempt_count == 0
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
+
+
+def test_persist_failed_item_result_rejects_non_running_job(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    claimed_job.status = JobStatus.COMPLETED
+    db_session.flush()
+
+    completed_at = datetime.now(UTC)
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item.attempt_count == 0
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
+
+
+def test_persist_failed_item_result_rejects_missing_job(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+    assert claimed_job.status == JobStatus.RUNNING
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+
+    completed_at = datetime.now(UTC)
+
+    wrong_job_id = uuid.uuid4()
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=wrong_job_id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item.attempt_count == 0
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
+
+
+def test_persist_failed_item_result_rejects_missing_item(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+    assert claimed_job.status == JobStatus.RUNNING
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+
+    completed_at = datetime.now(UTC)
+
+    wrong_item_id = uuid.uuid4()
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=claimed_job.id,
+        item_id=wrong_item_id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item.attempt_count == 0
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
+
+
+def test_persist_failed_item_result_rejects_item_from_another_job(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request_a = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["FastApi/FastApi"]),
+    )
+
+    request_b = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["SQLAlchemy/SQLAlchemy"]),
+    )
+
+    job_a = submit_job(
+        db_session,
+        user.id,
+        request=request_a,
+        idempotency_key="test-key-a",
+    )
+
+    job_b = submit_job(
+        db_session,
+        user.id,
+        request=request_b,
+        idempotency_key="test-key-b",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job_a = claim_job_for_execution(
+        db=db_session,
+        job_id=job_a.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job_a is not None
+    assert claimed_job_a.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(
+        RepositoryAnalysisItem.job_id == job_b.id
+    )
+    item_b = db_session.scalar(stmt)
+
+    assert item_b is not None
+    assert item_b.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=claimed_job_a.id,
+        item_id=item_b.id,
+        execution_token=claimed_job_a.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item_b.attempt_count == 0
+    assert item_b.status == RepositoryStatus.PENDING
+    assert item_b.error_type is None
+    assert item_b.error_message is None
+    assert item_b.completed_at is None
+
+
+def test_persist_failed_item_result_rejects_already_failed_item(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    first_result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert first_result is True
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == "GitHubUnavailableError"
+    assert item.error_message == "GitHub is temporarily unavailable"
+    assert item.attempt_count == 3
+    assert item.completed_at == completed_at
+
+    second_result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="RepositoryUnavailableError",
+        error_message="Repository not found",
+        attempt_count=2,
+        completed_at=completed_at,
+    )
+
+    assert second_result is False
+
+    db_session.refresh(item)
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == "GitHubUnavailableError"
+    assert item.error_message == "GitHub is temporarily unavailable"
+    assert item.attempt_count == 3
+    assert item.completed_at == completed_at
+
+
+def test_persist_failed_item_result_rejects_already_successful_item(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    successful_result = persist_successful_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        stars=100,
+        forks=20,
+        open_issues=5,
+        completed_at=completed_at,
+        language="Python",
+        archived=True,
+        last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
+        activity_classification="HIGH",
+    )
+
+    assert successful_result is True
+    assert item.status == RepositoryStatus.SUCCEEDED
+    assert item.stars == 100
+    assert item.forks == 20
+    assert item.open_issues == 5
+    assert item.attempt_count == 1
+
+    failed_result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert failed_result is False
+
+    db_session.refresh(item)
+
+    assert item.status == RepositoryStatus.SUCCEEDED
+    assert item.stars == 100
+    assert item.forks == 20
+    assert item.open_issues == 5
+    assert item.attempt_count == 1
+
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at == completed_at
+
+
+def test_persist_failed_item_result_rollback_restores_item(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    db_session.commit()
+
+    completed_at = datetime.now(UTC)
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is True
+
+    assert item.status == RepositoryStatus.FAILED
+
+    db_session.rollback()
+
+    item = db_session.scalar(stmt)
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.attempt_count == 0
+    assert item.completed_at is None
+
+
+def test_persist_failed_item_result_truncates_error_details(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+    error_type = "A" * 300
+    error_message = "B" * 300
+
+    result = persist_failed_item_result(
+        db=db_session,
+        job_id=job.id,
+        item_id=item.id,
+        execution_token=claimed_job.execution_token,
+        error_type=error_type,
+        error_message=error_message,
+        attempt_count=3,
+        completed_at=completed_at,
+    )
+
+    assert result is True
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == error_type[:255]
+    assert item.error_message == error_message[:255]
+
+
+def test_persist_failed_item_result_rejects_naive_timestamp(
+    db_session, authenticated_user_factory
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime(2026, 10, 2, 12, 0)
+
+    with pytest.raises(ValueError):
+        persist_failed_item_result(
+            db=db_session,
+            job_id=job.id,
+            item_id=item.id,
+            execution_token=claimed_job.execution_token,
+            error_type="GitHubUnavailableError",
+            error_message="GitHub is temporarily unavailable",
+            attempt_count=3,
+            completed_at=completed_at,
+        )
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.attempt_count == 0
+    assert item.completed_at is None
+
+
+@pytest.mark.parametrize("attempt_count", [0, -1, 4])
+def test_persist_failed_item_result_rejects_invalid_attempt_count(
+    db_session, authenticated_user_factory, attempt_count
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(repositories=["FastApi/FastApi"]),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    with pytest.raises(ValueError, match="attempt_count must be between 1 and 3"):
+        persist_failed_item_result(
+            db=db_session,
+            job_id=job.id,
+            item_id=item.id,
+            execution_token=claimed_job.execution_token,
+            error_type="GitHubUnavailableError",
+            error_message="GitHub is temporarily unavailable",
+            attempt_count=attempt_count,
+            completed_at=completed_at,
+        )
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.attempt_count == 0
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
