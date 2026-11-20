@@ -8,13 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
 from app.domain.repository_analysis import (
+    RepositoryAnalysisFailure,
     RepositoryAnalysisItemInput,
     RepositoryAnalysisResult,
     classify_repository_activity,
 )
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.repositories.job import increment_job_progress
-from app.repositories.repository_analysis_item import persist_successful_item_result
+from app.repositories.repository_analysis_item import (
+    persist_failed_item_result,
+    persist_successful_item_result,
+)
 from app.services.repository_analysis_handler import (
     RepositoryProvider,
     analyze_repositories,
@@ -65,6 +69,41 @@ def save_item_result_and_update_progress(
             archived=analysis_result.archived,
             last_push_at=analysis_result.last_push_at,
             activity_classification=activity_classification,
+        )
+
+        if not result:
+            db.rollback()
+            return False
+
+        increment_job_progress(db=db, job_id=job_id)
+        db.commit()
+        return True
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
+
+def save_item_failure_and_update_progress(
+    db: Session,
+    job_id: uuid.UUID,
+    item_id: uuid.UUID,
+    execution_token: uuid.UUID,
+    failure: RepositoryAnalysisFailure,
+    completed_at: datetime,
+) -> bool:
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+        raise ValueError("completed_at must be timezone-aware")
+
+    try:
+        result = persist_failed_item_result(
+            db=db,
+            job_id=job_id,
+            item_id=item_id,
+            execution_token=execution_token,
+            error_type=failure.error_type,
+            error_message=failure.error_message,
+            attempt_count=failure.attempt_count,
+            completed_at=completed_at,
         )
 
         if not result:

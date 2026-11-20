@@ -9,12 +9,16 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
-from app.domain.repository_analysis import RepositoryAnalysisResult
+from app.domain.repository_analysis import (
+    RepositoryAnalysisFailure,
+    RepositoryAnalysisResult,
+)
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
 from app.services.job_execution_service import (
     complete_claimed_job,
     execute_claimed_job,
     execute_claimed_job_async,
+    save_item_failure_and_update_progress,
     save_item_result_and_update_progress,
 )
 
@@ -1410,3 +1414,208 @@ def test_execute_claimed_job_async_preserves_terminal_items(
         "succeeded": 2,
         "failed": 1,
     }
+
+
+def test_save_item_failure_and_update_progress_succeeds(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=["FastApi/FastApi"],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    item = items[0]
+    item_id = item.id
+    job_id = item.job_id
+
+    assert item.status == RepositoryStatus.PENDING
+    assert claimed_job.progress_completed == 0
+
+    failure_result = RepositoryAnalysisFailure(
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+    )
+
+    completed_at = datetime.now(UTC)
+
+    result = save_item_failure_and_update_progress(
+        db=db_session,
+        job_id=job_id,
+        item_id=item_id,
+        execution_token=claimed_job.execution_token,
+        failure=failure_result,
+        completed_at=completed_at,
+    )
+
+    assert result is True
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == "GitHubUnavailableError"
+    assert item.error_message == "GitHub is temporarily unavailable"
+    assert item.attempt_count == 3
+    assert item.completed_at == completed_at
+    assert claimed_job.progress_completed == 1
+
+
+def test_save_item_failure_and_update_progress_rejects_stale_token(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=["FastApi/FastApi"],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    item = items[0]
+    item_id = item.id
+    job_id = item.job_id
+
+    assert item.status == RepositoryStatus.PENDING
+    assert claimed_job.progress_completed == 0
+
+    failure_result = RepositoryAnalysisFailure(
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+    )
+
+    completed_at = datetime.now(UTC)
+    wrong_execution_token = uuid.uuid4()
+
+    result = save_item_failure_and_update_progress(
+        db=db_session,
+        job_id=job_id,
+        item_id=item_id,
+        execution_token=wrong_execution_token,
+        failure=failure_result,
+        completed_at=completed_at,
+    )
+
+    assert result is False
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.attempt_count == 0
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
+
+    assert claimed_job.progress_completed == 0
+
+
+def test_save_item_failure_and_update_progress_rejects_duplicate_failure(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=["FastApi/FastApi"],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    item = items[0]
+    item_id = item.id
+    job_id = item.job_id
+
+    assert item.status == RepositoryStatus.PENDING
+    assert claimed_job.progress_completed == 0
+
+    failure_result = RepositoryAnalysisFailure(
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+    )
+
+    completed_at = datetime.now(UTC)
+
+    first_result = save_item_failure_and_update_progress(
+        db=db_session,
+        job_id=job_id,
+        item_id=item_id,
+        execution_token=claimed_job.execution_token,
+        failure=failure_result,
+        completed_at=completed_at,
+    )
+
+    assert first_result is True
+
+    second_result = save_item_failure_and_update_progress(
+        db=db_session,
+        job_id=job_id,
+        item_id=item_id,
+        execution_token=claimed_job.execution_token,
+        failure=failure_result,
+        completed_at=completed_at,
+    )
+
+    assert second_result is False
+
+    assert item.status == RepositoryStatus.FAILED
+    assert item.error_type == "GitHubUnavailableError"
+    assert item.error_message == "GitHub is temporarily unavailable"
+    assert item.attempt_count == 3
+    assert item.completed_at == completed_at
+    assert claimed_job.progress_completed == 1
+
+
+def test_save_item_failure_and_update_progress_rolls_back_on_progress_error(
+    db_session, claimed_job_factory
+):
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+    _, _, claimed_job, items = claimed_job_factory(
+        repositories=["FastApi/FastApi"],
+        claim_time=claim_time,
+        idempotency_key="test-key-123",
+    )
+
+    item = items[0]
+    item_id = item.id
+    job_id = item.job_id
+
+    assert item.status == RepositoryStatus.PENDING
+    assert claimed_job.progress_completed == 0
+
+    failure_result = RepositoryAnalysisFailure(
+        error_type="GitHubUnavailableError",
+        error_message="GitHub is temporarily unavailable",
+        attempt_count=3,
+    )
+
+    completed_at = datetime.now(UTC)
+
+    with patch(
+        "app.services.job_execution_service.increment_job_progress",
+        side_effect=SQLAlchemyError("progress update failed"),
+    ):
+        with pytest.raises(SQLAlchemyError, match="progress update failed"):
+            save_item_failure_and_update_progress(
+                db=db_session,
+                job_id=job_id,
+                item_id=item_id,
+                execution_token=claimed_job.execution_token,
+                failure=failure_result,
+                completed_at=completed_at,
+            )
+
+    db_session.expire_all()
+
+    stmt = select(Job).where(Job.id == job_id)
+    job = db_session.scalars(stmt).one()
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.id == item_id)
+    item = db_session.scalars(stmt).one()
+
+    assert job.progress_completed == 0
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.attempt_count == 0
+    assert item.error_type is None
+    assert item.error_message is None
+    assert item.completed_at is None
