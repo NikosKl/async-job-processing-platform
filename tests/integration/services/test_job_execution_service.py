@@ -70,6 +70,7 @@ def test_save_item_result_updates_progress_success(
         execution_token=claimed_job.execution_token,
         analysis_result=analysis_result,
         completed_at=completed_at,
+        attempt_count=3,
     )
 
     assert result is True
@@ -93,6 +94,7 @@ def test_save_item_result_updates_progress_success(
     assert item.archived == analysis_result.archived
     assert item.last_push_at == analysis_result.last_push_at
     assert item.activity_classification == expected_classification
+    assert item.attempt_count == 3
 
 
 def test_save_item_result_and_update_progress_repeated_result(
@@ -158,6 +160,7 @@ def test_save_item_result_and_update_progress_repeated_result(
     assert item.forks == analysis_result.forks
     assert item.open_issues == analysis_result.open_issues
     assert item.completed_at == completed_at
+    assert item.attempt_count == 1
 
 
 def test_save_item_result_and_update_progress_wrong_token(

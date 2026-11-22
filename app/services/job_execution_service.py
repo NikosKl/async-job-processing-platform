@@ -45,6 +45,7 @@ def save_item_result_and_update_progress(
     execution_token: uuid.UUID,
     analysis_result: RepositoryAnalysisResult,
     completed_at: datetime,
+    attempt_count: int = 1,
 ) -> bool:
 
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
@@ -69,6 +70,7 @@ def save_item_result_and_update_progress(
             archived=analysis_result.archived,
             last_push_at=analysis_result.last_push_at,
             activity_classification=activity_classification,
+            attempt_count=attempt_count,
         )
 
         if not result:

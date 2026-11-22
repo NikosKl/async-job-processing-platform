@@ -150,6 +150,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
         archived=True,
         last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
         activity_classification="HIGH",
+        attempt_count=3,
     )
 
     assert result is True
@@ -157,7 +158,7 @@ def test_persist_successful_item_result_current_owner_can_update_pending_item(
     assert item.stars == 100
     assert item.forks == 20
     assert item.open_issues == 5
-    assert item.attempt_count == 1
+    assert item.attempt_count == 3
     assert item.completed_at == completed_at
     assert item.error_type is None
     assert item.error_message is None
@@ -774,6 +775,74 @@ def test_persist_successful_item_result_rejects_stale_execution_token(
         assert item.forks is None
         assert item.open_issues is None
         assert item.completed_at is None
+
+
+@pytest.mark.parametrize("attempt_count", [0, -1, 4])
+def test_persist_successful_item_result_rejects_invalid_attempt_count(
+    db_session, authenticated_user_factory, attempt_count
+):
+    user, _ = authenticated_user_factory("user@example.com", "password123")
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=["FastApi/FastApi", "SQLAlchemy/SQLAlchemy", "Pallets/Flask"]
+        ),
+    )
+
+    job = submit_job(
+        db_session,
+        user.id,
+        request=request,
+        idempotency_key="test-key-123",
+    )
+
+    claim_time = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+    lease_duration = timedelta(minutes=10)
+
+    claimed_job = claim_job_for_execution(
+        db=db_session,
+        job_id=job.id,
+        claim_time=claim_time,
+        lease_duration=lease_duration,
+    )
+
+    assert claimed_job is not None
+    assert claimed_job.execution_token is not None
+
+    stmt = select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job.id)
+    item = db_session.scalar(stmt)
+
+    assert item is not None
+    assert item.status == RepositoryStatus.PENDING
+
+    completed_at = datetime.now(UTC)
+
+    with pytest.raises(ValueError, match="attempt_count must be between 1 and 3"):
+        persist_successful_item_result(
+            db=db_session,
+            job_id=job.id,
+            item_id=item.id,
+            execution_token=claimed_job.execution_token,
+            stars=100,
+            forks=20,
+            open_issues=5,
+            completed_at=completed_at,
+            language="Python",
+            archived=True,
+            last_push_at=datetime(2026, 9, 30, 14, 30, tzinfo=UTC),
+            activity_classification="HIGH",
+            attempt_count=attempt_count,
+        )
+
+    db_session.refresh(item)
+
+    assert item.status == RepositoryStatus.PENDING
+    assert item.attempt_count == 0
+    assert item.stars is None
+    assert item.forks is None
+    assert item.open_issues is None
+    assert item.completed_at is None
 
 
 def test_persist_failed_item_result_saves_failure_details(

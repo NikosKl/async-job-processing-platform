@@ -36,10 +36,14 @@ def persist_successful_item_result(
     archived: bool | None = None,
     last_push_at: datetime | None = None,
     activity_classification: str | None = None,
+    attempt_count: int = 1,
 ) -> bool:
 
     if completed_at.tzinfo is None or completed_at.utcoffset() is None:
         raise ValueError("completed_at must be timezone-aware")
+
+    if not 1 <= attempt_count <= 3:
+        raise ValueError("attempt_count must be between 1 and 3")
 
     stmt = (
         select(Job)
@@ -73,7 +77,7 @@ def persist_successful_item_result(
     item.activity_classification = activity_classification
     item.status = RepositoryStatus.SUCCEEDED
     item.completed_at = completed_at
-    item.attempt_count += 1
+    item.attempt_count = attempt_count
     item.error_type = None
     item.error_message = None
 
