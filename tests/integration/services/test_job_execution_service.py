@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import JobAttemptStatus, JobStatus, RepositoryStatus
+from app.domain.exceptions import GitHubUnavailableError, RepositoryUnavailableError
 from app.domain.repository_analysis import (
     RepositoryAnalysisFailure,
     RepositoryAnalysisResult,
@@ -21,6 +23,7 @@ from app.services.job_execution_service import (
     save_item_failure_and_update_progress,
     save_item_result_and_update_progress,
 )
+from app.services.repository_analysis_handler import analyze_repositories_with_retries
 
 
 @pytest.mark.parametrize(
@@ -1417,6 +1420,154 @@ def test_execute_claimed_job_async_preserves_terminal_items(
         "succeeded": 2,
         "failed": 1,
     }
+
+
+def test_execute_claimed_job_async_completes_mixed_outcomes(
+    db_session, claimed_job_factory
+):
+    _, _, claimed_job, _ = claimed_job_factory(
+        repositories=[
+            "owner/immediate",
+            "owner/retry",
+            "owner/missing",
+            "owner/exhausted",
+        ],
+        claim_time=datetime.now(UTC),
+        idempotency_key="mixed-outcomes",
+    )
+
+    job_id = claimed_job.id
+    execution_token = claimed_job.execution_token
+    assert execution_token is not None
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = {}
+
+        async def get_repository(
+            self, owner: str, repository: str
+        ) -> RepositoryAnalysisResult:
+            self.calls[repository] = self.calls.get(repository, 0) + 1
+
+            if repository == "missing":
+                raise RepositoryUnavailableError("Repository not found")
+
+            if repository == "exhausted":
+                raise GitHubUnavailableError("GitHub is temporarily unavailable")
+
+            if repository == "retry" and self.calls[repository] == 1:
+                raise GitHubUnavailableError("GitHub is temporarily unavailable")
+
+            if repository not in {"immediate", "retry"}:
+                raise AssertionError(f"Unexpected repository: {repository}")
+
+            return RepositoryAnalysisResult(
+                owner=owner,
+                repository=repository,
+                stars=100,
+                forks=20,
+                open_issues=5,
+            )
+
+    provider = FakeProvider()
+    sleep_calls = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await asyncio.sleep(0)
+
+    handler = partial(
+        analyze_repositories_with_retries,
+        sleep=fake_sleep,
+    )
+
+    with patch(
+        "app.services.job_execution_service.analyze_repositories_with_retries",
+        new=handler,
+    ):
+        result = asyncio.run(
+            execute_claimed_job_async(
+                db=db_session,
+                job_id=job_id,
+                execution_token=execution_token,
+                github_client=provider,
+            )
+        )
+
+    assert result is True
+    assert provider.calls == {
+        "immediate": 1,
+        "retry": 2,
+        "missing": 1,
+        "exhausted": 3,
+    }
+    assert sorted(sleep_calls) == [1, 1, 2]
+
+    db_session.expire_all()
+
+    job = db_session.get(Job, job_id)
+    assert job is not None
+    assert job.status == JobStatus.COMPLETED
+    assert job.progress_total == 4
+    assert job.progress_completed == 4
+    assert job.result_summary == {
+        "total": 4,
+        "succeeded": 2,
+        "failed": 2,
+    }
+    assert job.finished_at is not None
+    assert job.execution_token is None
+    assert job.lease_expires_at is None
+
+    items = db_session.scalars(
+        select(RepositoryAnalysisItem).where(RepositoryAnalysisItem.job_id == job_id)
+    ).all()
+
+    assert len(items) == 4
+    items_by_name = {item.repository_name: item for item in items}
+
+    for name, expected_attempts in [("immediate", 1), ("retry", 2)]:
+        item = items_by_name[name]
+        assert item.status == RepositoryStatus.SUCCEEDED
+        assert item.attempt_count == expected_attempts
+        assert (item.stars, item.forks, item.open_issues) == (100, 20, 5)
+        assert item.error_type is None
+        assert item.error_message is None
+        assert item.completed_at is not None
+
+    expected_failures = {
+        "missing": (
+            1,
+            "RepositoryUnavailableError",
+            "Repository not found",
+        ),
+        "exhausted": (
+            3,
+            "GitHubUnavailableError",
+            "GitHub is temporarily unavailable",
+        ),
+    }
+
+    for name, (attempts, error_type, error_message) in expected_failures.items():
+        item = items_by_name[name]
+        assert item.status == RepositoryStatus.FAILED
+        assert item.attempt_count == attempts
+        assert item.error_type == error_type
+        assert item.error_message == error_message
+        assert item.completed_at is not None
+        assert item.stars is None
+        assert item.forks is None
+        assert item.open_issues is None
+
+    attempt = db_session.scalars(
+        select(JobAttempt).where(
+            JobAttempt.job_id == job_id,
+            JobAttempt.attempt_number == job.attempt_count,
+        )
+    ).one()
+
+    assert attempt.status == JobAttemptStatus.SUCCEEDED
+    assert attempt.finished_at is not None
 
 
 def test_save_item_failure_and_update_progress_succeeds(

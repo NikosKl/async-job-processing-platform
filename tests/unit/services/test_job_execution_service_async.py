@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.domain.repository_analysis import RepositoryAnalysisResult
+from app.domain.repository_analysis import (
+    RepositoryAnalysisFailure,
+    RepositoryAnalysisResult,
+    RepositoryAnalysisSuccess,
+)
 from app.services.job_execution_service import execute_claimed_job_async
 
 
@@ -43,8 +47,14 @@ def test_async_execution_saves_out_of_order_results_to_correct_items():
     )
 
     async def fake_analyze_repositories(_provider, _items):
-        yield django_id, django_result
-        yield fastapi_id, fastapi_result
+        yield (
+            django_id,
+            RepositoryAnalysisSuccess(result=django_result, attempt_count=3),
+        )
+        yield (
+            fastapi_id,
+            RepositoryAnalysisSuccess(result=fastapi_result, attempt_count=1),
+        )
 
     class FakeGitHubClient:
         @staticmethod
@@ -54,7 +64,7 @@ def test_async_execution_saves_out_of_order_results_to_correct_items():
             raise AssertionError("Should not be called")
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -89,6 +99,9 @@ def test_async_execution_saves_out_of_order_results_to_correct_items():
                     mock_save.call_args_list[1].kwargs["analysis_result"]
                     == fastapi_result
                 )
+
+                assert mock_save.call_args_list[0].kwargs["attempt_count"] == 3
+                assert mock_save.call_args_list[1].kwargs["attempt_count"] == 1
 
                 mock_complete.assert_called_once()
 
@@ -130,10 +143,16 @@ def test_async_execution_saves_sequentially_with_correct_token_and_timestamps():
 
     async def fake_analyze_repositories(_provider, _items):
         events.append("django_yielded")
-        yield django_id, django_result
+        yield (
+            django_id,
+            RepositoryAnalysisSuccess(result=django_result, attempt_count=3),
+        )
 
         events.append("fastapi_yielded")
-        yield fastapi_id, fastapi_result
+        yield (
+            fastapi_id,
+            RepositoryAnalysisSuccess(result=fastapi_result, attempt_count=1),
+        )
 
     def record_save(**kwargs):
         if kwargs["item_id"] == django_id:
@@ -152,7 +171,7 @@ def test_async_execution_saves_sequentially_with_correct_token_and_timestamps():
             raise AssertionError("Should not be called")
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -202,7 +221,8 @@ def test_async_execution_saves_sequentially_with_correct_token_and_timestamps():
                 assert second_timestamp.utcoffset() == timedelta(0)
 
 
-def test_async_execution_stops_and_cleans_up_on_rejected_save():
+@pytest.mark.parametrize("outcome_type", ["success", "failure"])
+def test_async_execution_stops_and_cleans_up_on_rejected_save(outcome_type):
     fastapi_id = uuid.uuid4()
     django_id = uuid.uuid4()
 
@@ -239,11 +259,26 @@ def test_async_execution_stops_and_cleans_up_on_rejected_save():
 
     async def fake_analyze_repositories(_provider, _items):
         try:
+            if outcome_type == "success":
+                outcome = RepositoryAnalysisSuccess(
+                    result=fastapi_result,
+                    attempt_count=3,
+                )
+            else:
+                outcome = RepositoryAnalysisFailure(
+                    error_type="RepositoryUnavailableError",
+                    error_message="Repository not found",
+                    attempt_count=1,
+                )
+
             events.append("fastapi_yielded")
-            yield fastapi_id, fastapi_result
+            yield fastapi_id, outcome
 
             events.append("django_yielded")
-            yield django_id, django_result
+            yield (
+                django_id,
+                RepositoryAnalysisSuccess(result=django_result, attempt_count=1),
+            )
 
         finally:
             events.append("analysis_closed")
@@ -260,7 +295,7 @@ def test_async_execution_stops_and_cleans_up_on_rejected_save():
     github_client = FakeGitHubClient()
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -268,31 +303,46 @@ def test_async_execution_stops_and_cleans_up_on_rejected_save():
             return_value=False,
         ) as mock_save:
             with patch(
-                "app.services.job_execution_service.complete_claimed_job",
-                return_value=True,
-            ) as mock_complete:
+                "app.services.job_execution_service.save_item_failure_and_update_progress",
+                return_value=False,
+            ) as mock_failure_save:
+                with patch(
+                    "app.services.job_execution_service.complete_claimed_job",
+                    return_value=True,
+                ) as mock_complete:
 
-                async def run_test():
-                    test_result = await execute_claimed_job_async(
-                        db,
-                        job_id,
-                        execution_token,
-                        github_client,
-                    )
+                    async def run_test():
+                        test_result = await execute_claimed_job_async(
+                            db,
+                            job_id,
+                            execution_token,
+                            github_client,
+                        )
 
-                    assert events == [
-                        "fastapi_yielded",
-                        "analysis_closed",
-                    ]
+                        assert events == [
+                            "fastapi_yielded",
+                            "analysis_closed",
+                        ]
 
-                    return test_result
+                        return test_result
 
-                result = asyncio.run(run_test())
+                    result = asyncio.run(run_test())
 
-                assert result is False
-                mock_save.assert_called_once()
-                assert mock_save.call_args.kwargs["item_id"] == fastapi_id
-                mock_complete.assert_not_called()
+                    assert result is False
+
+                    if outcome_type == "success":
+                        mock_save.assert_called_once()
+                        assert mock_save.call_args.kwargs["item_id"] == fastapi_id
+                        mock_failure_save.assert_not_called()
+
+                    else:
+                        mock_failure_save.assert_called_once()
+                        assert (
+                            mock_failure_save.call_args.kwargs["item_id"] == fastapi_id
+                        )
+                        mock_save.assert_not_called()
+
+                    mock_complete.assert_not_called()
 
 
 def test_async_execution_propagates_analysis_error_and_cleans_up():
@@ -318,7 +368,10 @@ def test_async_execution_propagates_analysis_error_and_cleans_up():
 
     async def fake_analyze_repositories(_provider, _items):
         try:
-            yield fastapi_id, fastapi_result
+            yield (
+                fastapi_id,
+                RepositoryAnalysisSuccess(result=fastapi_result, attempt_count=1),
+            )
             raise RuntimeError("analysis failed")
         finally:
             events.append("analysis_closed")
@@ -335,7 +388,7 @@ def test_async_execution_propagates_analysis_error_and_cleans_up():
     github_client = FakeGitHubClient()
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -384,7 +437,10 @@ def test_async_execution_propagates_persistence_error_and_cleans_up():
 
     async def fake_analyze_repositories(_provider, _items):
         try:
-            yield fastapi_id, fastapi_result
+            yield (
+                fastapi_id,
+                RepositoryAnalysisSuccess(result=fastapi_result, attempt_count=1),
+            )
         finally:
             events.append("analysis_closed")
 
@@ -400,7 +456,7 @@ def test_async_execution_propagates_persistence_error_and_cleans_up():
     github_client = FakeGitHubClient()
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -450,7 +506,10 @@ def test_async_execution_returns_false_when_completion_rejected():
     )
 
     async def fake_analyze_repositories(_provider, _items):
-        yield fastapi_id, fastapi_result
+        yield (
+            fastapi_id,
+            RepositoryAnalysisSuccess(result=fastapi_result, attempt_count=1),
+        )
 
     class FakeGitHubClient:
         @staticmethod
@@ -464,7 +523,7 @@ def test_async_execution_returns_false_when_completion_rejected():
     github_client = FakeGitHubClient()
 
     with patch(
-        "app.services.job_execution_service.analyze_repositories",
+        "app.services.job_execution_service.analyze_repositories_with_retries",
         new=fake_analyze_repositories,
     ):
         with patch(
@@ -532,3 +591,88 @@ def test_async_execution_completes_job_with_no_pending_items():
 
             assert mock_complete.call_args.kwargs["job_id"] == job_id
             assert mock_complete.call_args.kwargs["execution_token"] == execution_token
+
+
+def test_async_execution_saves_failure_outcome():
+    fastapi_id = uuid.uuid4()
+
+    fastapi_item = MagicMock()
+    fastapi_item.id = fastapi_id
+    fastapi_item.owner = "fastapi"
+    fastapi_item.repository_name = "fastapi"
+
+    db = MagicMock()
+    db.scalars.return_value.all.return_value = [fastapi_item]
+
+    outcome_failure = RepositoryAnalysisFailure(
+        error_type="RepositoryUnavailableError",
+        error_message="Repository not found",
+        attempt_count=1,
+    )
+
+    async def fake_analyze_repositories(_provider, _items):
+        yield fastapi_id, outcome_failure
+
+    class FakeGitHubClient:
+        @staticmethod
+        async def get_repository(
+            owner: str, repository: str
+        ) -> RepositoryAnalysisResult:
+            raise AssertionError("Should not be called")
+
+    events = []
+
+    def record_failure_save(**_kwargs):
+        events.append("failure_saved")
+        return True
+
+    def record_job_completion(**_kwargs):
+        events.append("job_completed")
+        return True
+
+    with patch(
+        "app.services.job_execution_service.analyze_repositories_with_retries",
+        new=fake_analyze_repositories,
+    ):
+        with patch(
+            "app.services.job_execution_service.save_item_failure_and_update_progress",
+            side_effect=record_failure_save,
+        ) as failure_save_mock:
+            with patch(
+                "app.services.job_execution_service.save_item_result_and_update_progress",
+                return_value=True,
+            ) as mock_success_save:
+                with patch(
+                    "app.services.job_execution_service.complete_claimed_job",
+                    side_effect=record_job_completion,
+                ) as mock_complete:
+                    job_id = uuid.uuid4()
+                    execution_token = uuid.uuid4()
+                    github_client = FakeGitHubClient()
+
+                    result = asyncio.run(
+                        execute_claimed_job_async(
+                            db, job_id, execution_token, github_client
+                        )
+                    )
+
+                assert result is True
+
+                assert events == ["failure_saved", "job_completed"]
+
+                failure_save_mock.assert_called_once()
+                mock_success_save.assert_not_called()
+                mock_complete.assert_called_once()
+
+                kwargs = failure_save_mock.call_args.kwargs
+
+                assert kwargs["db"] is db
+                assert kwargs["job_id"] == job_id
+                assert kwargs["item_id"] == fastapi_id
+                assert kwargs["execution_token"] == execution_token
+                assert kwargs["failure"] is outcome_failure
+
+                completed_at = kwargs["completed_at"]
+                assert isinstance(completed_at, datetime)
+                assert completed_at.tzinfo is not None
+                assert completed_at.utcoffset() is not None

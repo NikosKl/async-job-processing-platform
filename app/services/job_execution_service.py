@@ -11,6 +11,7 @@ from app.domain.repository_analysis import (
     RepositoryAnalysisFailure,
     RepositoryAnalysisItemInput,
     RepositoryAnalysisResult,
+    RepositoryAnalysisSuccess,
     classify_repository_activity,
 )
 from app.models import Job, JobAttempt, RepositoryAnalysisItem
@@ -21,7 +22,7 @@ from app.repositories.repository_analysis_item import (
 )
 from app.services.repository_analysis_handler import (
     RepositoryProvider,
-    analyze_repositories,
+    analyze_repositories_with_retries,
 )
 
 
@@ -290,19 +291,30 @@ async def execute_claimed_job_async(
         analysis_inputs.append(analysis_item)
 
     async with aclosing(
-        analyze_repositories(github_client, analysis_inputs)
+        analyze_repositories_with_retries(github_client, analysis_inputs)
     ) as results:
-        async for item_id, result in results:
+        async for item_id, outcome in results:
             completed_at = datetime.now(UTC)
 
-            saved_item = save_item_result_and_update_progress(
-                db=db,
-                job_id=job_id,
-                item_id=item_id,
-                execution_token=execution_token,
-                analysis_result=result,
-                completed_at=completed_at,
-            )
+            if isinstance(outcome, RepositoryAnalysisSuccess):
+                saved_item = save_item_result_and_update_progress(
+                    db=db,
+                    job_id=job_id,
+                    item_id=item_id,
+                    execution_token=execution_token,
+                    analysis_result=outcome.result,
+                    completed_at=completed_at,
+                    attempt_count=outcome.attempt_count,
+                )
+            elif isinstance(outcome, RepositoryAnalysisFailure):
+                saved_item = save_item_failure_and_update_progress(
+                    db=db,
+                    job_id=job_id,
+                    item_id=item_id,
+                    execution_token=execution_token,
+                    failure=outcome,
+                    completed_at=completed_at,
+                )
 
             if not saved_item:
                 return False
