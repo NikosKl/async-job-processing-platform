@@ -143,3 +143,20 @@ def _parse_retry_after(value: str | None) -> float | None:
     if delay < 0:
         return None
     return delay
+
+
+def _parse_rate_limit_reset(
+    value: str | None, reference_time: datetime
+) -> float | None:
+
+    if reference_time.tzinfo is None or reference_time.utcoffset() is None:
+        raise ValueError("reference_time must be timezone-aware")
+
+    reset_timestamp = _parse_retry_after(value)
+
+    if reset_timestamp is None:
+        return None
+
+    remaining_seconds = reset_timestamp - reference_time.timestamp()
+
+    return max(0.0, remaining_seconds)

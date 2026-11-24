@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -10,7 +10,12 @@ from app.domain.exceptions import (
     RepositoryUnavailableError,
 )
 from app.domain.repository_analysis import RepositoryAnalysisResult
-from app.providers.github import GitHubClient, _parse_retry_after, github_client_context
+from app.providers.github import (
+    GitHubClient,
+    _parse_rate_limit_reset,
+    _parse_retry_after,
+    github_client_context,
+)
 
 # HANDLERS
 
@@ -1006,3 +1011,89 @@ def test_parse_retry_after(
     result = _parse_retry_after(header_value)
 
     assert result == expected
+
+
+def test_parse_rate_limit_reset_returns_remaining_seconds():
+    reference_time = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    reset_timestamp = reference_time.timestamp() + 60
+    header_value = str(reset_timestamp)
+
+    result = _parse_rate_limit_reset(header_value, reference_time)
+
+    assert result == 60.0
+
+
+@pytest.mark.parametrize(
+    "offset_seconds",
+    [
+        pytest.param(0, id="equal"),
+        pytest.param(-60, id="past"),
+    ],
+)
+def test_parse_rate_limit_reset_returns_zero_for_expired_timestamp(
+    offset_seconds: int,
+):
+    reference_time = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    header_value = str(reference_time.timestamp() + offset_seconds)
+
+    result = _parse_rate_limit_reset(header_value, reference_time)
+
+    assert result == 0.0
+
+
+def test_parse_rate_limit_reset_accepts_whitespace():
+    reference_time = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    reset_timestamp = reference_time.timestamp() + 60
+
+    header_value = f"   {reset_timestamp}   "
+
+    result = _parse_rate_limit_reset(header_value, reference_time)
+
+    assert result == 60.0
+
+
+def test_parse_rate_limit_reset_rejects_naive_reference_time():
+    reference_time = datetime(2026, 11, 24, 12, 0)
+
+    header_value = str(reference_time.timestamp())
+    with pytest.raises(ValueError, match="reference_time must be timezone-aware"):
+        _parse_rate_limit_reset(header_value, reference_time)
+
+
+def test_parse_rate_limit_reset_handles_different_utc_offsets():
+    reference_time_utc = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    reference_time_offset = datetime(
+        2026, 11, 24, 14, 0, tzinfo=timezone(timedelta(hours=2))
+    )
+
+    header_value = str(reference_time_utc.timestamp() + 60)
+
+    result = _parse_rate_limit_reset(header_value, reference_time_utc)
+    result_offset = _parse_rate_limit_reset(header_value, reference_time_offset)
+
+    assert result == 60.0
+    assert result_offset == 60.0
+
+
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        pytest.param("-1", id="negative"),
+        pytest.param("inf", id="positive-infinity"),
+        pytest.param("-inf", id="negative-infinity"),
+        pytest.param("nan", id="nan"),
+        pytest.param("", id="empty"),
+        pytest.param("invalid", id="nonnumeric"),
+        pytest.param(None, id="missing"),
+    ],
+)
+def test_parse_rate_limit_rejects_invalid_header(header_value: str | None):
+    reference_time_utc = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    result = _parse_rate_limit_reset(header_value, reference_time_utc)
+
+    assert result is None
