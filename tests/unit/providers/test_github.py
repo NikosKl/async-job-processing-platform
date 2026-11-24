@@ -10,7 +10,7 @@ from app.domain.exceptions import (
     RepositoryUnavailableError,
 )
 from app.domain.repository_analysis import RepositoryAnalysisResult
-from app.providers.github import GitHubClient, github_client_context
+from app.providers.github import GitHubClient, _parse_retry_after, github_client_context
 
 # HANDLERS
 
@@ -982,3 +982,27 @@ def test_github_client_rejects_invalid_pushed_at(pushed_at):
                 await github_client.get_repository("fastapi", "fastapi")
 
     asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "header_value, expected",
+    [
+        pytest.param("60", 60.0, id="positive"),
+        pytest.param("0", 0.0, id="zero"),
+        pytest.param(" 30 ", 30.0, id="whitespace"),
+        pytest.param(None, None, id="missing"),
+        pytest.param("", None, id="empty"),
+        pytest.param("invalid", None, id="nonnumeric"),
+        pytest.param("-5", None, id="negative"),
+        pytest.param("nan", None, id="nan"),
+        pytest.param("inf", None, id="positive-infinity"),
+        pytest.param("-inf", None, id="negative-infinity"),
+    ],
+)
+def test_parse_retry_after(
+    header_value: str | None,
+    expected: float | None,
+):
+    result = _parse_retry_after(header_value)
+
+    assert result == expected

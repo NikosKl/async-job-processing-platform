@@ -1,4 +1,5 @@
 import json
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -126,3 +127,19 @@ async def github_client_context(
 
     async with httpx.AsyncClient(transport=transport) as client:
         yield GitHubClient(client, token)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        delay = float(value)
+    except ValueError:
+        return None
+
+    if not math.isfinite(delay):
+        return None
+    if delay < 0:
+        return None
+    return delay
