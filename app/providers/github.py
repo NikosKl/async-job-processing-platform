@@ -73,9 +73,13 @@ class GitHubClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
-                raise RepositoryUnavailableError() from exc
+                raise RepositoryUnavailableError(
+                    "Repository not found or inaccessible"
+                ) from exc
             if exc.response.is_server_error:
-                raise GitHubUnavailableError() from exc
+                raise GitHubUnavailableError(
+                    "GitHub is temporarily unavailable"
+                ) from exc
             raise
 
         try:
