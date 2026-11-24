@@ -1,4 +1,5 @@
 from app.domain.exceptions import (
+    GitHubRateLimitError,
     GitHubUnavailableError,
     InvalidRepositoryResponseError,
     RepositoryUnavailableError,
@@ -45,3 +46,11 @@ def test_unexpected_exception_returns_none():
     result = classify_repository_error(error)
 
     assert result is None
+
+
+def test_github_rate_limit_error_is_retryable():
+    error = GitHubRateLimitError(retry_after_seconds=60.0)
+
+    result = classify_repository_error(error)
+
+    assert result == "RETRYABLE"
