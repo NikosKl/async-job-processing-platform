@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from app.domain.exceptions import (
+    GitHubRateLimitError,
     GitHubUnavailableError,
     RepositoryAnalysisFailedError,
     RepositoryUnavailableError,
@@ -602,7 +603,24 @@ def test_analyze_repository_with_retries_propagates_cancellation():
     asyncio.run(run_test())
 
 
-def test_analyze_repository_with_retries_releases_semaphore_during_backoff():
+@pytest.mark.parametrize(
+    ("first_error", "expected_delay"),
+    [
+        pytest.param(
+            GitHubUnavailableError("GitHub temporarily unavailable"),
+            1,
+            id="ordinary-backoff",
+        ),
+        pytest.param(
+            GitHubRateLimitError(retry_after_seconds=60.0),
+            60.0,
+            id="rate-limit",
+        ),
+    ],
+)
+def test_analyze_repository_with_retries_releases_semaphore_during_backoff(
+    first_error, expected_delay
+):
     item = RepositoryAnalysisItemInput(
         item_id=uuid4(),
         owner="fastapi",
@@ -627,7 +645,7 @@ def test_analyze_repository_with_retries_releases_semaphore_during_backoff():
             self.calls.append((owner, repository))
 
             if len(self.calls) == 1:
-                raise GitHubUnavailableError("GitHub temporarily unavailable")
+                raise first_error
 
             return expected_result
 
@@ -655,7 +673,7 @@ def test_analyze_repository_with_retries_releases_semaphore_during_backoff():
     asyncio.run(run_test())
 
     assert len(fake_provider.calls) == 2
-    assert sleep_calls == [1]
+    assert sleep_calls == [expected_delay]
 
 
 def test_analyze_repositories_with_retries_immediate_success():
@@ -1186,3 +1204,144 @@ def test_analyze_repositories_with_retries_respects_concurrency_limit():
         assert sleep_calls == [1] * 5
 
     asyncio.run(asyncio.wait_for(run_test(), timeout=10))
+
+
+def test_rate_limit_error_retries_with_requested_delay():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi",
+        repository="fastapi",
+        stars=100,
+        forks=20,
+        open_issues=5,
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+
+            if len(self.calls) == 1:
+                raise GitHubRateLimitError(retry_after_seconds=30.0)
+
+            return expected_result
+
+    fake_provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=fake_provider,
+            repository=item,
+            semaphore=asyncio.Semaphore(10),
+            sleep=sleep_mock,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 2
+
+    asyncio.run(run_test())
+
+    assert fake_provider.calls == [
+        ("fastapi", "fastapi"),
+        ("fastapi", "fastapi"),
+    ]
+
+    sleep_mock.assert_awaited_once_with(30.0)
+
+
+def test_analyze_repository_with_retries_exhausts_rate_limit_attempts():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    errors = [
+        GitHubRateLimitError(retry_after_seconds=10.0),
+        GitHubRateLimitError(retry_after_seconds=20.0),
+        GitHubRateLimitError(retry_after_seconds=30.0),
+    ]
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(
+            self, owner: str, repository: str
+        ) -> RepositoryAnalysisResult:
+            self.calls.append((owner, repository))
+            raise errors[len(self.calls) - 1]
+
+    provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        with pytest.raises(RepositoryAnalysisFailedError) as exc_info:
+            await analyze_repository_with_retries(
+                provider=provider,
+                repository=item,
+                semaphore=asyncio.Semaphore(1),
+                sleep=sleep_mock,
+            )
+
+        assert provider.calls == [("fastapi", "fastapi")] * 3
+        assert sleep_mock.await_args_list == [call(10.0), call(20.0)]
+        assert exc_info.value.attempt_count == 3
+        assert exc_info.value.__cause__ is errors[2]
+
+    asyncio.run(run_test())
+
+
+def test_analyze_repository_with_retries_accepts_zero_rate_limit_delay():
+    item = RepositoryAnalysisItemInput(
+        item_id=uuid4(),
+        owner="fastapi",
+        repository="fastapi",
+    )
+
+    expected_result = RepositoryAnalysisResult(
+        owner="fastapi",
+        repository="fastapi",
+        stars=100,
+        forks=20,
+        open_issues=5,
+    )
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def get_repository(self, owner, repository):
+            self.calls.append((owner, repository))
+
+            if len(self.calls) == 1:
+                raise GitHubRateLimitError(retry_after_seconds=0.0)
+
+            return expected_result
+
+    provider = FakeProvider()
+    sleep_mock = AsyncMock()
+
+    async def run_test():
+        result, attempt_count = await analyze_repository_with_retries(
+            provider=provider,
+            repository=item,
+            semaphore=asyncio.Semaphore(1),
+            sleep=sleep_mock,
+        )
+
+        assert result == expected_result
+        assert attempt_count == 2
+
+    asyncio.run(run_test())
+
+    assert provider.calls == [("fastapi", "fastapi")] * 2
+    sleep_mock.assert_awaited_once_with(0.0)

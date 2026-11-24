@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
-from app.domain.exceptions import RepositoryAnalysisFailedError
+from app.domain.exceptions import GitHubRateLimitError, RepositoryAnalysisFailedError
 from app.domain.repository_analysis import (
     RepositoryAnalysisFailure,
     RepositoryAnalysisItemInput,
@@ -77,11 +77,13 @@ async def analyze_repository_with_retries(
 
             if classification is None:
                 raise
-            if classification == "PERMANENT":
+
+            if classification == "PERMANENT" or attempt_count == 3:
                 raise RepositoryAnalysisFailedError(attempt_count) from error
-            if classification == "RETRYABLE":
-                if attempt_count == 3:
-                    raise RepositoryAnalysisFailedError(attempt_count) from error
+
+            if isinstance(error, GitHubRateLimitError):
+                await sleep(error.retry_after_seconds)
+            else:
                 await sleep(attempt_count)
     raise RuntimeError("Retry loop ended without a result or failure")
 
