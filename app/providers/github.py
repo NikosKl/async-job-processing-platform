@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
 
 from app.domain.exceptions import (
+    GitHubRateLimitError,
     GitHubUnavailableError,
     InvalidRepositoryResponseError,
     RepositoryUnavailableError,
@@ -73,10 +74,36 @@ class GitHubClient:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                headers = exc.response.headers
+                if (
+                    "Retry-After" in headers
+                    or headers.get("X-RateLimit-Remaining") == "0"
+                ):
+                    delay = _get_rate_limit_delay(exc.response, datetime.now(UTC))
+                    raise GitHubRateLimitError(delay) from exc
+                try:
+                    data = exc.response.json()
+                except ValueError:
+                    data = None
+                if isinstance(data, dict):
+                    message = data.get("message")
+                    if (
+                        isinstance(message, str)
+                        and "secondary rate limit" in message.lower()
+                    ):
+                        delay = _get_rate_limit_delay(exc.response, datetime.now(UTC))
+                        raise GitHubRateLimitError(delay) from exc
+
             if exc.response.status_code == 404:
                 raise RepositoryUnavailableError(
                     "Repository not found or inaccessible"
                 ) from exc
+
+            if exc.response.status_code == 429:
+                delay = _get_rate_limit_delay(exc.response, datetime.now(UTC))
+                raise GitHubRateLimitError(delay) from exc
+
             if exc.response.is_server_error:
                 raise GitHubUnavailableError(
                     "GitHub is temporarily unavailable"
@@ -160,3 +187,24 @@ def _parse_rate_limit_reset(
     remaining_seconds = reset_timestamp - reference_time.timestamp()
 
     return max(0.0, remaining_seconds)
+
+
+def _get_rate_limit_delay(
+    response: httpx.Response,
+    reference_time: datetime,
+) -> float:
+    retry_after_header = response.headers.get("Retry-After")
+    retry_after_delay = _parse_retry_after(retry_after_header)
+
+    if retry_after_delay is not None:
+        return retry_after_delay
+
+    remaining_header = response.headers.get("X-RateLimit-Remaining")
+    if remaining_header == "0":
+        reset_header = response.headers.get("X-RateLimit-Reset")
+        reset_delay = _parse_rate_limit_reset(reset_header, reference_time)
+
+        if reset_delay is not None:
+            return reset_delay
+
+    return 60.0

@@ -1,10 +1,12 @@
 import asyncio
 from datetime import UTC, datetime, timedelta, timezone
+from unittest.mock import patch
 
 import httpx
 import pytest
 
 from app.domain.exceptions import (
+    GitHubRateLimitError,
     GitHubUnavailableError,
     InvalidRepositoryResponseError,
     RepositoryUnavailableError,
@@ -1097,3 +1099,237 @@ def test_parse_rate_limit_rejects_invalid_header(header_value: str | None):
     result = _parse_rate_limit_reset(header_value, reference_time_utc)
 
     assert result is None
+
+
+def test_github_client_raises_rate_limit_error_on_429():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=429, headers={"Retry-After": "30"}, request=request
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 30.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+def test_github_client_raises_rate_limit_error_on_403_with_retry_after():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=403, headers={"Retry-After": "30"}, request=request
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 30.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "status_code",
+    [
+        pytest.param(403, id="403"),
+        pytest.param(429, id="429"),
+    ],
+)
+def test_github_client_raises_rate_limit_error_with_reset(status_code):
+    reference_time = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    reset_timestamp = str(reference_time.timestamp() + 120)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        return httpx.Response(
+            status_code=status_code,
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": reset_timestamp,
+            },
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with patch("app.providers.github.datetime") as clock_mock:
+                clock_mock.now.return_value = reference_time
+
+                with pytest.raises(GitHubRateLimitError) as exc_info:
+                    await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 120.0
+
+            original_error = exc_info.value.__cause__
+            assert isinstance(original_error, httpx.HTTPStatusError)
+            assert original_error.response.status_code == status_code
+
+    asyncio.run(run_test())
+
+
+def test_github_client_rate_limit_prefers_retry_after():
+    reference_time = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    reset_timestamp = str(reference_time.timestamp() + 60)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        return httpx.Response(
+            status_code=403,
+            headers={
+                "retry-after": "30",
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": reset_timestamp,
+            },
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with patch("app.providers.github.datetime") as clock_mock:
+                clock_mock.now.return_value = reference_time
+
+                with pytest.raises(GitHubRateLimitError) as exc_info:
+                    await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 30.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+def test_github_client_rate_limit_accepts_zero_retry_after():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=429, headers={"Retry-After": "0"}, request=request
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 0.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"Retry-After": "invalid"}, id="invalid"),
+    ],
+)
+def test_github_client_rate_limit_uses_fallback_delay(headers):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=429, headers=headers, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 60.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+def test_github_client_recognizes_secondary_rate_limit():
+    def handler(request: httpx.Request) -> httpx.Response:
+        json = {"message": "You have exceeded a secondary rate limit"}
+
+        return httpx.Response(status_code=403, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.retry_after_seconds == 60.0
+            assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+    asyncio.run(run_test())
+
+
+def test_github_client_preserves_ordinary_403_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        json = {"message": "Resource not accessible by integration"}
+
+        return httpx.Response(status_code=403, json=json, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.response.status_code == 403
+
+    asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("not valid json", id="malformed"),
+        pytest.param('["forbidden"]', id="json-list"),
+        pytest.param('{"message": 123}', id="invalid-message"),
+    ],
+)
+def test_github_client_preserves_403_with_unexpected_json(body):
+    def handler(request: httpx.Request) -> httpx.Response:
+
+        return httpx.Response(status_code=403, content=body, request=request)
+
+    transport = httpx.MockTransport(handler)
+
+    async def run_test():
+        async with httpx.AsyncClient(transport=transport) as client:
+            github_client = GitHubClient(client)
+
+            with pytest.raises(httpx.HTTPStatusError) as exc_info:
+                await github_client.get_repository("fastapi", "fastapi")
+
+            assert exc_info.value.response.status_code == 403
+
+    asyncio.run(run_test())
