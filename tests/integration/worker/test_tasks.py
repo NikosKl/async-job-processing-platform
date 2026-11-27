@@ -398,6 +398,242 @@ def test_process_job_completes_mixed_outcomes(test_session_factory):
         assert attempt.finished_at is not None
 
 
+def test_process_job_handles_rate_limit_outcomes(test_session_factory):
+    reference_time = datetime(2026, 11, 13, 14, 30, tzinfo=UTC)
+    retry_after_push = reference_time - timedelta(days=5)
+    reset_push = reference_time - timedelta(days=181)
+
+    request_counts: dict[str, int] = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        path = http_request.url.path
+        request_counts[path] = request_counts.get(path, 0) + 1
+
+        if path == "/repos/owner/retry-after":
+            if request_counts[path] == 1:
+                return httpx.Response(
+                    status_code=403,
+                    headers={"Retry-After": "30"},
+                    request=http_request,
+                )
+
+            owner, repo = "owner", "retry-after"
+            stars, forks, open_issues = 100, 20, 5
+            language = "python"
+            archived = True
+            pushed_at = retry_after_push.isoformat()
+
+        elif path == "/repos/owner/reset":
+            if request_counts[path] == 1:
+                reset_timestamp = str(reference_time.timestamp() + 120)
+
+                return httpx.Response(
+                    status_code=429,
+                    headers={
+                        "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Reset": reset_timestamp,
+                    },
+                    request=http_request,
+                )
+
+            owner, repo = "owner", "reset"
+            stars, forks, open_issues = 250, 50, 10
+            language = "c"
+            archived = False
+            pushed_at = reset_push.isoformat()
+
+        elif path == "/repos/owner/exhausted":
+            return httpx.Response(
+                status_code=429,
+                headers={"Retry-After": "45"},
+                request=http_request,
+            )
+
+        else:
+            raise AssertionError(f"Unexpected GitHub request: {http_request.url}")
+
+        return httpx.Response(
+            status_code=200,
+            json={
+                "owner": {"login": owner},
+                "name": repo,
+                "stargazers_count": stars,
+                "forks_count": forks,
+                "open_issues_count": open_issues,
+                "language": language,
+                "archived": archived,
+                "pushed_at": pushed_at,
+            },
+            request=http_request,
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    request = CreateJobRequest(
+        type="repository_batch_analysis",
+        input=RepositoryBatchAnalysisInput(
+            repositories=[
+                "owner/retry-after",
+                "owner/reset",
+                "owner/exhausted",
+            ]
+        ),
+    )
+
+    with test_session_factory() as db:
+        user = create_user(
+            db=db,
+            email="user@example.com",
+            hashed_password="hashed_password",
+        )
+
+        job = create_job(
+            db=db,
+            user_id=user.id,
+            request=request,
+            idempotency_key="test-key-123",
+            request_hash=hash_job_request(request),
+        )
+
+        job_id = job.id
+        db.commit()
+
+    with test_session_factory() as db:
+        job = db.get(Job, job_id)
+
+        assert job is not None
+        assert job.status == JobStatus.QUEUED
+        assert job.attempt_count == 0
+
+    sleep_durations: list[float] = []
+
+    async def fake_sleep(duration: float) -> None:
+        sleep_durations.append(duration)
+        await asyncio.sleep(0)
+
+    with patch("app.worker.tasks.DBSession", new=test_session_factory):
+        with patch(
+            "app.worker.tasks.github_client_context",
+            new=partial(github_client_context, transport=transport),
+        ):
+            with (
+                patch("app.services.job_execution_service.datetime") as clock_mock,
+                patch("app.worker.tasks.datetime") as task_clock_mock,
+                patch(
+                    "app.providers.github.datetime", wraps=datetime
+                ) as github_clock_mock,
+            ):
+                clock_mock.now.return_value = reference_time
+                task_clock_mock.now.return_value = reference_time
+                github_clock_mock.now.return_value = reference_time
+
+                with patch(
+                    "app.services.job_execution_service.analyze_repositories_with_retries",
+                    new=partial(analyze_repositories_with_retries, sleep=fake_sleep),
+                ):
+                    process_job.run(str(job_id))
+
+                assert request_counts["/repos/owner/retry-after"] == 2
+                assert request_counts["/repos/owner/reset"] == 2
+                assert request_counts["/repos/owner/exhausted"] == 3
+
+                assert sorted(sleep_durations) == [30.0, 45.0, 45.0, 120.0]
+
+        with test_session_factory() as db:
+            stmt = select(Job).where(Job.id == job_id)
+            job = db.scalars(stmt).one()
+
+            stmt = select(JobAttempt).where(JobAttempt.job_id == job_id)
+            attempts = db.scalars(stmt).all()
+
+            stmt = select(RepositoryAnalysisItem).where(
+                RepositoryAnalysisItem.job_id == job_id
+            )
+            analysis_items = db.scalars(stmt).all()
+
+            assert len(analysis_items) == 3
+
+            expected_metrics = {
+                "retry-after": (
+                    100,
+                    20,
+                    5,
+                    "python",
+                    True,
+                    retry_after_push,
+                    "HIGH",
+                    2,
+                ),
+                "reset": (250, 50, 10, "c", False, reset_push, "LOW", 2),
+            }
+
+            for item in analysis_items:
+                if item.repository_name in expected_metrics:
+                    assert item.status == RepositoryStatus.SUCCEEDED
+                    (
+                        expected_stars,
+                        expected_forks,
+                        expected_issues,
+                        expected_language,
+                        expected_archived,
+                        expected_last_push_at,
+                        expected_classification,
+                        expected_attempt_count,
+                    ) = expected_metrics[item.repository_name]
+
+                    assert item.stars == expected_stars
+                    assert item.forks == expected_forks
+                    assert item.open_issues == expected_issues
+                    assert item.completed_at is not None
+                    assert item.primary_language == expected_language
+                    assert item.archived == expected_archived
+                    assert item.last_push_at == expected_last_push_at
+                    assert item.activity_classification == expected_classification
+
+                    assert item.attempt_count == expected_attempt_count
+                    assert item.error_type is None
+                    assert item.error_message is None
+
+                elif item.repository_name == "exhausted":
+                    assert item.status == RepositoryStatus.FAILED
+                    assert item.attempt_count == 3
+                    assert item.error_type == "GitHubRateLimitError"
+                    assert item.error_message == (
+                        "GitHub rate limit exceeded: 45.0 seconds"
+                    )
+                    assert item.completed_at is not None
+
+                    assert item.stars is None
+                    assert item.forks is None
+                    assert item.open_issues is None
+
+            assert job.status == JobStatus.COMPLETED
+            assert job.attempt_count == 1
+            assert job.progress_completed == 3
+            assert job.progress_total == 3
+            assert job.result_summary == {
+                "total": 3,
+                "succeeded": 2,
+                "failed": 1,
+            }
+
+            assert job.started_at is not None
+            assert job.finished_at is not None
+            assert job.started_at <= job.finished_at
+            assert job.execution_token is None
+            assert job.lease_expires_at is None
+
+            assert len(attempts) == 1
+
+            attempt = attempts[0]
+
+            assert attempt.attempt_number == 1
+            assert attempt.status == JobAttemptStatus.SUCCEEDED
+            assert attempt.started_at is not None
+            assert attempt.finished_at is not None
+            assert attempt.finished_at == job.finished_at
+
+
 def test_process_job_does_not_reexecute_completed_job(test_session_factory):
     http_requests = []
 
